@@ -438,11 +438,20 @@ function holdDaysFor(age: number | null): number {
   return 30;
 }
 
-/** The category's one action, in the words a farmer can follow. */
+/**
+ * The category's one action, in the words a farmer can follow. Every category on the board has its own
+ * branch naming the protocol's real mechanism (deposit, supply, stake, mint, bridge, trade, vote) —
+ * the generic fallback only serves a protocol with no category or a category the board does not carry.
+ * Order matters: a specific branch is checked before the general one its name contains ('yield
+ * aggregator' before 'yield', 'bridge' before 'chain', 'leveraged farm' before 'farm', 'restaking'
+ * before 'btc'), so a category always lands on its most specific action.
+ */
 function actionFor(p: SnapshotProtocol, capital: number, chain: string): string {
   const c = (p.category ?? '').toLowerCase();
   const name = p.name;
-  if (c.includes('lend') || c.includes('cdp') || c.includes('collateral')) return `Supply $${capital} of USDC to ${name} on ${chain} and keep the position open.`;
+  if (c.includes('yield aggregator')) return `Deposit $${capital} into a ${name} yield vault on ${chain} and let it compound.`;
+  if (c.includes('cdp')) return `Deposit $${capital} of collateral into ${name} on ${chain} and mint its stable asset.`;
+  if (c.includes('lend') || c.includes('collateral')) return `Supply $${capital} of USDC to ${name} on ${chain} and keep the position open.`;
   if (c.includes('dex') || c.includes('yield') || c.includes('leveraged farm')) return `Provide $${capital} of liquidity to ${name}'s main pool on ${chain} and keep the position open.`;
   if (c.includes('bridge')) return `Bridge $${capital} of USDC to ${chain} through ${name} and use the bridged funds in its app.`;
   if (c.includes('staking') || c.includes('restak')) return `Stake $${capital} of the chain's staking asset through ${name} and keep the receipt.`;
@@ -452,7 +461,47 @@ function actionFor(p: SnapshotProtocol, capital: number, chain: string): string 
   if (c.includes('stable')) return `Mint or deposit $${capital} of the stable asset through ${name} on ${chain}.`;
   if (c.includes('rwa')) return `Mint $${capital} of the protocol's yield asset on ${chain} and hold it.`;
   if (c.includes('insurance')) return `Buy $${capital} of cover from ${name} on ${chain} and keep the policy.`;
+  if (c.includes('basis')) return `Deposit $${capital} into the ${name} basis vault on ${chain} and keep the position open.`;
+  if (c.includes('chain')) return `Bridge $${capital} of USDC to ${name} and keep it in one of its apps.`;
+  if (c.includes('farm')) return `Provide $${capital} of liquidity through ${name} on ${chain} and stake the LP tokens in its farm.`;
+  if (c.includes('liquidity manager')) return `Deposit $${capital} into a ${name} managed pool on ${chain} and keep the shares.`;
+  if (c.includes('cedefi')) return `Deposit $${capital} into the ${name} earn vault on ${chain} and keep the receipt.`;
+  if (c.includes('btc')) return `Deposit $${capital} of BTC through ${name} on ${chain} and keep the receipt.`;
+  if (c.includes('payment')) return `Route $${capital} of payments through ${name} on ${chain} and keep the receipts.`;
+  if (c.includes('otc')) return `Fill $${capital} of OTC trades through ${name} on ${chain} and keep the receipts.`;
+  if (c.includes('governance')) return `Deposit $${capital} into the ${name} voting market on ${chain} and vote each round.`;
+  if (c.includes('card')) return `Spend $${capital} through the ${name} card on ${chain} and keep the statements.`;
+  if (c.includes('index')) return `Buy $${capital} of the ${name} index on ${chain} and hold it.`;
   return `Deposit $${capital} of USDC into ${name} on ${chain} and keep the position open.`;
+}
+
+/** The Ethereum L2s and cheap rollups: one transaction costs about $0.10 there. */
+const L2_CHAINS = [
+  'arbitrum', 'optimism', 'base', 'polygon', 'zksync', 'starknet', 'linea', 'scroll', 'blast', 'mantle',
+  'ink', 'world chain', 'manta', 'morph', 'rise', 'robinhood', 'reya', 'mode', 'zora', 'fraxtal',
+  'metis', 'boba', 'kroma', 'lisk', 'unichain', 'soneium', 'abstract', 'aevo', 'lyra', 'nova',
+];
+
+/**
+ * What one transaction costs on a chain, in dollars: a chain property, not a per-name hardcode.
+ * Ethereum ~$3 (a simple transaction on L1 in 2026); Solana ~$0.01 (5,000-lamport base fee);
+ * BNB Smart Chain ~$0.05 (DefiLlama names it "Binance"); the L2s ~$0.10; every other chain $0.50,
+ * a conservative upper bound for a simple transaction on a chain whose fee market the radar does
+ * not price. The farm plan's setup costs two transactions (approve, then deposit), so step 2
+ * charges twice this; the weekly action costs one.
+ */
+function gasPerTx(chain: string): number {
+  const c = chain.toLowerCase();
+  if (c === 'ethereum') return 3;
+  if (c === 'solana') return 0.01;
+  if (c === 'binance' || c === 'bsc' || c.includes('bnb')) return 0.05;
+  if (L2_CHAINS.some((l2) => c.includes(l2))) return 0.1;
+  return 0.5;
+}
+
+/** A dollar amount as the farm plan prints it: $3, $1, $0.50, $0.10, $0.01 — no trailing noise. */
+function dollars(n: number): string {
+  return n >= 1 ? `$${Math.round(n)}` : `$${n.toFixed(2)}`;
 }
 
 /**
@@ -464,20 +513,21 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
   const capital = capitalFor(p);
   const hold = holdDaysFor(age);
   const action = actionFor(p, capital, chain);
+  const gas = gasPerTx(chain);
   return [
     {
       text: `Use a fresh wallet that holds only the funds you plan to farm, and keep its seed phrase offline.`,
-      cost: 'under $3 of gas for the first transaction',
+      cost: `under ${dollars(gas)} of gas for the first transaction`,
       time: '5 minutes',
     },
     {
       text: action,
-      cost: `$${capital} of capital and about $${capital >= 150 ? 8 : 4} of gas`,
+      cost: `$${capital} of capital and about ${dollars(gas * 2)} of gas`,
       time: '15 minutes to set up',
     },
     {
       text: `Make one qualifying action each week, such as a deposit, a borrow, a swap or a vote.`,
-      cost: 'about $2 of gas a week',
+      cost: `about ${dollars(gas)} of gas a week`,
       time: '10 minutes a week',
     },
     {

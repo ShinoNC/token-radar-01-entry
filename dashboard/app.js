@@ -76,10 +76,17 @@
     if (age < 365) return 45;
     return 30;
   }
+  // Every category on the board has its own branch naming the protocol's real mechanism; the generic
+  // fallback only serves a protocol with no category. Order matters: a specific branch is checked
+  // before the general one its name contains ('yield aggregator' before 'yield', 'bridge' before
+  // 'chain', 'leveraged farm' before 'farm', 'restaking' before 'btc'). This mirrors lib/model.ts
+  // exactly — the page's farm plans must agree with board.json.
   function actionFor(p, capital, chain) {
     var c = (p.category || '').toLowerCase();
     var name = p.name;
-    if (c.indexOf('lend') >= 0 || c.indexOf('cdp') >= 0 || c.indexOf('collateral') >= 0) return 'Supply $' + capital + ' of USDC to ' + name + ' on ' + chain + ' and keep the position open.';
+    if (c.indexOf('yield aggregator') >= 0) return 'Deposit $' + capital + ' into a ' + name + ' yield vault on ' + chain + ' and let it compound.';
+    if (c.indexOf('cdp') >= 0) return 'Deposit $' + capital + ' of collateral into ' + name + ' on ' + chain + ' and mint its stable asset.';
+    if (c.indexOf('lend') >= 0 || c.indexOf('collateral') >= 0) return 'Supply $' + capital + ' of USDC to ' + name + ' on ' + chain + ' and keep the position open.';
     if (c.indexOf('dex') >= 0 || c.indexOf('yield') >= 0 || c.indexOf('leveraged farm') >= 0) return 'Provide $' + capital + ' of liquidity to ' + name + "'s main pool on " + chain + ' and keep the position open.';
     if (c.indexOf('bridge') >= 0) return 'Bridge $' + capital + ' of USDC to ' + chain + ' through ' + name + ' and use the bridged funds in its app.';
     if (c.indexOf('staking') >= 0 || c.indexOf('restak') >= 0) return "Stake $" + capital + " of the chain's staking asset through " + name + ' and keep the receipt.';
@@ -89,8 +96,32 @@
     if (c.indexOf('stable') >= 0) return 'Mint or deposit $' + capital + ' of the stable asset through ' + name + ' on ' + chain + '.';
     if (c.indexOf('rwa') >= 0) return "Mint $" + capital + " of the protocol's yield asset on " + chain + ' and hold it.';
     if (c.indexOf('insurance') >= 0) return 'Buy $' + capital + ' of cover from ' + name + ' on ' + chain + ' and keep the policy.';
+    if (c.indexOf('basis') >= 0) return 'Deposit $' + capital + ' into the ' + name + ' basis vault on ' + chain + ' and keep the position open.';
+    if (c.indexOf('chain') >= 0) return 'Bridge $' + capital + ' of USDC to ' + name + ' and keep it in one of its apps.';
+    if (c.indexOf('farm') >= 0) return 'Provide $' + capital + ' of liquidity through ' + name + ' on ' + chain + ' and stake the LP tokens in its farm.';
+    if (c.indexOf('liquidity manager') >= 0) return 'Deposit $' + capital + ' into a ' + name + ' managed pool on ' + chain + ' and keep the shares.';
+    if (c.indexOf('cedefi') >= 0) return 'Deposit $' + capital + ' into the ' + name + ' earn vault on ' + chain + ' and keep the receipt.';
+    if (c.indexOf('btc') >= 0) return 'Deposit $' + capital + ' of BTC through ' + name + ' on ' + chain + ' and keep the receipt.';
+    if (c.indexOf('payment') >= 0) return 'Route $' + capital + ' of payments through ' + name + ' on ' + chain + ' and keep the receipts.';
+    if (c.indexOf('otc') >= 0) return 'Fill $' + capital + ' of OTC trades through ' + name + ' on ' + chain + ' and keep the receipts.';
+    if (c.indexOf('governance') >= 0) return 'Deposit $' + capital + ' into the ' + name + ' voting market on ' + chain + ' and vote each round.';
+    if (c.indexOf('card') >= 0) return 'Spend $' + capital + ' through the ' + name + ' card on ' + chain + ' and keep the statements.';
+    if (c.indexOf('index') >= 0) return 'Buy $' + capital + ' of the ' + name + ' index on ' + chain + ' and hold it.';
     return 'Deposit $' + capital + ' of USDC into ' + name + ' on ' + chain + ' and keep the position open.';
   }
+  // What one transaction costs on a chain, in dollars: Ethereum ~$3, Solana ~$0.01, BNB Smart Chain
+  // (DefiLlama names it "Binance") ~$0.05, the L2s ~$0.10, every other chain $0.50. The setup costs
+  // two transactions (approve, then deposit); the weekly action costs one.
+  var L2_CHAINS = ['arbitrum', 'optimism', 'base', 'polygon', 'zksync', 'starknet', 'linea', 'scroll', 'blast', 'mantle', 'ink', 'world chain', 'manta', 'morph', 'rise', 'robinhood', 'reya', 'mode', 'zora', 'fraxtal', 'metis', 'boba', 'kroma', 'lisk', 'unichain', 'soneium', 'abstract', 'aevo', 'lyra', 'nova'];
+  function gasPerTx(chain) {
+    var c = chain.toLowerCase();
+    if (c === 'ethereum') return 3;
+    if (c === 'solana') return 0.01;
+    if (c === 'binance' || c === 'bsc' || c.indexOf('bnb') >= 0) return 0.05;
+    for (var i = 0; i < L2_CHAINS.length; i++) if (c.indexOf(L2_CHAINS[i]) >= 0) return 0.1;
+    return 0.5;
+  }
+  function dollars(n) { return n >= 1 ? '$' + Math.round(n) : '$' + n.toFixed(2); }
   function stepText(step) {
     var s = step.text + ' Cost: ' + step.cost + '. Time: ' + step.time + '.';
     if (s.length > 600) s = s.slice(0, 596) + '...';
@@ -101,10 +132,11 @@
     var chain = chainOf(p);
     var capital = capitalFor(p);
     var hold = holdDaysFor(p.age_days);
+    var gas = gasPerTx(chain);
     return [
-      { text: 'Use a fresh wallet that holds only the funds you plan to farm, and keep its seed phrase offline.', cost: 'under $3 of gas for the first transaction', time: '5 minutes' },
-      { text: actionFor(p, capital, chain), cost: '$' + capital + ' of capital and about $' + (capital >= 150 ? 8 : 4) + ' of gas', time: '15 minutes to set up' },
-      { text: 'Make one qualifying action each week, such as a deposit, a borrow, a swap or a vote.', cost: 'about $2 of gas a week', time: '10 minutes a week' },
+      { text: 'Use a fresh wallet that holds only the funds you plan to farm, and keep its seed phrase offline.', cost: 'under ' + dollars(gas) + ' of gas for the first transaction', time: '5 minutes' },
+      { text: actionFor(p, capital, chain), cost: '$' + capital + ' of capital and about ' + dollars(gas * 2) + ' of gas', time: '15 minutes to set up' },
+      { text: 'Make one qualifying action each week, such as a deposit, a borrow, a swap or a vote.', cost: 'about ' + dollars(gas) + ' of gas a week', time: '10 minutes a week' },
       { text: 'Hold the position for at least ' + hold + ' days so the activity is counted in more than one snapshot.', cost: 'the $' + capital + ' stays in the position', time: hold + ' days' },
       { text: "Before you withdraw, open the protocol's own points or rewards page and claim only from the link it publishes.", cost: 'no fee to check, and never pay to claim', time: '10 minutes' },
       { text: 'Write the wallet, the dates and every transaction in a farm log so you can repeat the position or unwind it.', cost: 'nothing but the log', time: '5 minutes' }
