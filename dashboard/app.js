@@ -1,13 +1,14 @@
-// Token Radar's plain dashboard. It reads window.RADAR (written beside dashboard/ by main.ts) and
-// renders the ranked board, a filterable table, a per-protocol detail drawer with the model's own
-// inputs and the protocol's farm plan. No network: every byte it shows is in data.js.
+// Token Radar's dashboard. It reads window.RADAR (written beside dashboard/ by main.ts) and renders
+// the ranked board: a top-10 strip, a filterable sortable table, a per-protocol detail drawer with the
+// model's own inputs and the protocol's farm plan, and the multiples table the model was computed from.
+// No network: every byte it shows is in data.js. No protocol name is special-cased anywhere.
 (function () {
   'use strict';
 
   var DATA = window.RADAR;
   if (!DATA) return;
   var app = document.getElementById('board');
-  var state = { q: '', category: 'all', tab: 'pre-token', sort: 'implied', dir: -1, selected: null };
+  var state = { q: '', category: 'all', chain: 'all', tab: 'pre-token', sort: 'implied', dir: -1, selected: null };
 
   var usd = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
   function fmtUsd(n) {
@@ -42,7 +43,6 @@
       Object.keys(attrs).forEach(function (k) {
         if (k === 'class') node.className = attrs[k];
         else if (k === 'text') node.textContent = attrs[k];
-        else if (k === 'html') node.innerHTML = attrs[k];
         else if (k.slice(0, 2) === 'on') node.addEventListener(k.slice(2), attrs[k]);
         else if (attrs[k] !== null && attrs[k] !== undefined) node.setAttribute(k, attrs[k]);
       });
@@ -50,7 +50,11 @@
     for (var i = 2; i < arguments.length; i++) {
       var child = arguments[i];
       if (child === null || child === undefined) continue;
-      if (Array.isArray(child)) child.forEach(function (c) { if (c) node.appendChild(c); });
+      if (Array.isArray(child)) child.forEach(function (c) {
+        if (c === null || c === undefined) return;
+        if (typeof c === 'string') node.appendChild(document.createTextNode(c));
+        else node.appendChild(c);
+      });
       else if (typeof child === 'string') node.appendChild(document.createTextNode(child));
       else node.appendChild(child);
     }
@@ -107,6 +111,24 @@
     ].map(stepText);
   }
 
+  // The multiples table, looked up by category: the derivation of one row's multiple.
+  function multipleEntry(category) {
+    if (!category) return null;
+    var found = DATA.multiples.categories.filter(function (c) { return c.category === category; });
+    return found.length ? found[0] : null;
+  }
+  // Board categories with no live comparable at all: they fall back to the overall median.
+  function noEvidenceCategories() {
+    var known = {};
+    DATA.multiples.categories.forEach(function (c) { known[c.category] = true; });
+    var out = [];
+    DATA.rows.forEach(function (r) {
+      var cat = r.category || 'Other';
+      if (!known[cat] && out.indexOf(cat) < 0) out.push(cat);
+    });
+    return out.sort();
+  }
+
   function readHash() {
     var hash = window.location.hash.replace(/^#/, '');
     if (!hash) return;
@@ -114,11 +136,13 @@
     if (params.get('q')) state.q = params.get('q');
     if (params.get('p')) state.selected = params.get('p');
     if (params.get('category')) state.category = params.get('category');
+    if (params.get('chain')) state.chain = params.get('chain');
   }
   function writeHash() {
     var params = new URLSearchParams();
     if (state.q) params.set('q', state.q);
     if (state.category !== 'all') params.set('category', state.category);
+    if (state.chain !== 'all') params.set('chain', state.chain);
     if (state.selected) params.set('p', state.selected);
     var next = params.toString();
     if (next) window.history.replaceState(null, '', '#' + next);
@@ -128,7 +152,8 @@
   function rows() {
     var q = state.q.trim().toLowerCase();
     return DATA.rows.filter(function (r) {
-      if (state.category !== 'all' && r.category !== state.category) return false;
+      if (state.category !== 'all' && (r.category || 'Other') !== state.category) return false;
+      if (state.chain !== 'all' && (!r.chains || r.chains.indexOf(state.chain) < 0)) return false;
       if (!q) return true;
       var hay = [r.name, r.slug, r.category, (r.chains || []).join(' ')].join(' ').toLowerCase();
       return hay.indexOf(q) >= 0;
@@ -148,47 +173,77 @@
       return a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0;
     });
   }
+  function topRows(n) {
+    return DATA.rows.slice().sort(function (a, b) { return a.rank - b.rank; }).slice(0, n);
+  }
 
   function header() {
     return el('header', { class: 'top' },
-      el('div', { class: 'brand' }, el('span', { class: 'mark' }), el('span', { class: 'brand-name', text: 'Token Radar' })),
+      el('div', { class: 'brand' }, el('span', { class: 'radar-mark', 'aria-hidden': 'true' }), el('span', { class: 'brand-name' }, 'Token ', el('span', { text: 'Radar' }))),
       el('div', { class: 'top-meta' },
-        el('span', { text: 'Snapshot ' + DATA.as_of }),
-        el('span', { text: 'DefiLlama protocol index' }),
-        el('span', { text: DATA.model_version + ' model' })
+        el('span', null, 'Snapshot ', el('b', { text: DATA.as_of })),
+        el('span', null, 'DefiLlama protocol index'),
+        el('span', null, 'Model ', el('b', { text: DATA.model_version }))
       )
     );
   }
 
   function lede() {
     return el('section', { class: 'lede' },
-      el('div', null,
-        el('h1', { text: DATA.watchlist_size + ' watchlist protocols, ranked by implied value' }),
-        el('p', { text: 'The watchlist is the floor: every protocol with at least $' + Math.round(DATA.floor_usd / 1e6) + 'M of TVL and no token on record. The radar adds ' + DATA.early_size + ' more pre-token protocols the watchlist does not name. Implied value is a model, not a promise.' })
-      ),
-      el('div', { class: 'facts' },
-        el('div', { class: 'fact' }, el('span', { text: 'Watchlist covered' }), el('b', { text: DATA.watchlist_size + ' / ' + DATA.watchlist_size })),
-        el('div', { class: 'fact' }, el('span', { text: 'Pre-token rows scored' }), el('b', { text: String(DATA.board_size) })),
-        el('div', { class: 'fact' }, el('span', { text: 'Rows beyond the watchlist' }), el('b', { text: String(DATA.early_size) })),
-        el('div', { class: 'fact' }, el('span', { text: 'Live-token protocols set aside' }), el('b', { text: String(DATA.live_size) }))
+      el('div', { class: 'kicker', text: 'Pre-token radar · ' + DATA.as_of }),
+      el('h1', { text: 'The next token launches, ranked before they exist' }),
+      el('p', { text: 'The watchlist is the floor: every protocol with at least $' + Math.round(DATA.floor_usd / 1e6) + 'M of TVL and no token on record. The radar adds ' + DATA.early_size + ' more pre-token protocols the watchlist does not name — including the largest ones it misses. Implied value is a model of what a token would be worth if the protocol issued one today, not a promise that it will.' }),
+      el('div', { class: 'stats' },
+        el('div', { class: 'stat amber' }, el('b', { text: DATA.watchlist_size + ' / ' + DATA.watchlist_size }), el('span', { text: 'Watchlist protocols covered' })),
+        el('div', { class: 'stat' }, el('b', { text: String(DATA.board_size) }), el('span', { text: 'Pre-token rows scored' })),
+        el('div', { class: 'stat' }, el('b', { text: String(DATA.early_size) }), el('span', { text: 'Rows beyond the watchlist' })),
+        el('div', { class: 'stat' }, el('b', { text: String(DATA.live_size) }), el('span', { text: 'Live-token protocols set aside' }))
       )
+    );
+  }
+
+  function topStrip() {
+    var cards = topRows(10).map(function (r) {
+      var growth = r.change_7d === null ? null : el('span', { class: 'chip ' + (r.change_7d >= 0 ? 'pos' : 'neg'), text: fmtPct(r.change_7d) + ' 7d' });
+      return el('button', { class: 'card', type: 'button', 'aria-label': 'Rank ' + r.rank + ': ' + r.name + ', implied value ' + fmtUsd(r.implied_value_usd), onclick: function () { openDetail(r.slug); } },
+        el('span', { class: 'rank', text: '#' + r.rank }),
+        el('span', { class: 'cname', text: r.name }),
+        el('span', { class: 'cmeta', text: (r.category || 'Other') + ' · ' + (r.chains && r.chains.length ? r.chains[0] : 'multi-chain') }),
+        el('span', { class: 'cvalue' }, el('span', { text: 'Implied value' }), fmtUsd(r.implied_value_usd)),
+        el('span', { class: 'ctvl', text: 'TVL ' + fmtUsd(r.tvl_usd) }),
+        growth
+      );
+    });
+    return el('section', { 'aria-label': 'Top 10 by implied value' },
+      el('div', { class: 'strip-head' },
+        el('h2', { text: 'Top 10 by implied value' }),
+        el('span', { class: 'sub', text: 'Select a card for its model and farm plan' })
+      ),
+      el('div', { class: 'strip' }, cards)
     );
   }
 
   function controls() {
     var categories = Array.from(new Set(DATA.rows.map(function (r) { return r.category || 'Other'; }))).sort();
+    var chains = Array.from(new Set(DATA.rows.reduce(function (acc, r) { return acc.concat(r.chains || []); }, []))).sort();
     var search = el('input', { type: 'search', id: 'q', placeholder: 'Search name, category or chain', value: state.q, 'aria-label': 'Search the board' });
     search.addEventListener('input', function () { state.q = search.value; writeHash(); render(); });
-    var select = el('select', { id: 'category', 'aria-label': 'Filter by category' },
+    var catSelect = el('select', { id: 'category', 'aria-label': 'Filter by category' },
       el('option', { value: 'all', text: 'All categories' }),
       categories.map(function (c) { return el('option', { value: c, text: c, selected: c === state.category ? 'selected' : null }); })
     );
-    select.addEventListener('change', function () { state.category = select.value; writeHash(); render(); });
+    catSelect.addEventListener('change', function () { state.category = catSelect.value; writeHash(); render(); });
+    var chainSelect = el('select', { id: 'chain', 'aria-label': 'Filter by chain' },
+      el('option', { value: 'all', text: 'All chains' }),
+      chains.map(function (c) { return el('option', { value: c, text: c, selected: c === state.chain ? 'selected' : null }); })
+    );
+    chainSelect.addEventListener('change', function () { state.chain = chainSelect.value; writeHash(); render(); });
     var pre = el('button', { type: 'button', 'aria-pressed': state.tab === 'pre-token' ? 'true' : 'false', text: 'Pre-token', onclick: function () { state.tab = 'pre-token'; render(); } });
     var live = el('button', { type: 'button', 'aria-pressed': state.tab === 'live' ? 'true' : 'false', text: 'Live token', onclick: function () { state.tab = 'live'; render(); } });
     return el('div', { class: 'controls' },
       el('div', { class: 'field' }, el('label', { for: 'q', text: 'Search' }), search),
-      el('div', { class: 'field' }, el('label', { for: 'category', text: 'Category' }), select),
+      el('div', { class: 'field' }, el('label', { for: 'category', text: 'Category' }), catSelect),
+      el('div', { class: 'field' }, el('label', { for: 'chain', text: 'Chain' }), chainSelect),
       el('div', { class: 'field' }, el('span', { class: 'sub', text: 'Token status' }), el('div', { class: 'tabs' }, pre, live)),
       el('span', { class: 'count', text: state.tab === 'pre-token' ? rows().length + ' rows shown' : DATA.live.length + ' live-token protocols' })
     );
@@ -208,8 +263,8 @@
     if (list.length === 0) {
       return el('div', { class: 'panel' }, el('div', { class: 'empty' },
         el('h2', { text: 'No protocol matches that filter' }),
-        el('p', { text: 'Clear the search or pick another category to see the board again.' }),
-        el('button', { class: 'button primary', type: 'button', text: 'Clear filters', onclick: function () { state.q = ''; state.category = 'all'; writeHash(); render(); } })
+        el('p', { text: 'Clear the search or pick another category or chain to see the board again.' }),
+        el('button', { class: 'button primary', type: 'button', text: 'Clear filters', onclick: function () { state.q = ''; state.category = 'all'; state.chain = 'all'; writeHash(); render(); } })
       ));
     }
     var max = list[0].implied_value_usd || 1;
@@ -223,7 +278,7 @@
         onclick: function () { openDetail(r.slug); },
         onkeydown: function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openDetail(r.slug); } }
       },
-        el('td', { class: 'num', text: String(r.rank) }),
+        el('td', null, el('span', { class: 'rank-badge' + (r.rank <= 3 ? ' top3' : ''), text: String(r.rank) })),
         el('td', null, el('div', { class: 'name' },
           el('b', { text: r.name }),
           el('span', { class: 'sub', text: (r.category || 'Other') + ' on ' + (r.chains && r.chains.length ? r.chains.slice(0, 2).join(', ') : 'an unnamed chain') })
@@ -262,12 +317,12 @@
     var tbody = el('tbody');
     DATA.live.forEach(function (r) {
       tbody.appendChild(el('tr', null,
-        el('td', { class: 'num', text: 'live' }),
+        el('td', null, el('span', { class: 'status live', text: 'live' })),
         el('td', null, el('div', { class: 'name' }, el('b', { text: r.name }), el('span', { class: 'sub', text: (r.category || 'Other') + ' on ' + (r.chains && r.chains.length ? r.chains.slice(0, 2).join(', ') : 'an unnamed chain') }))),
         el('td', { class: 'num', text: fmtUsd(r.tvl_usd) }),
         el('td', { class: 'num ' + (r.change_7d !== null && r.change_7d >= 0 ? 'pos' : 'neg'), text: fmtPct(r.change_7d) }),
         el('td', { class: 'num', text: fmtUsd(r.mcap_usd) }),
-        el('td', null, el('span', { class: 'status', text: 'already trades' }))
+        el('td', null, el('span', { class: 'status live', text: 'already trades' }))
       ));
     });
     return el('div', { class: 'panel' },
@@ -281,15 +336,91 @@
     );
   }
 
+  // The multiples table: every category's multiple with its evidence. Sorted by multiple, highest
+  // first, so the spread the model is built on is visible at a glance.
+  function multiplesTable() {
+    var m = DATA.model;
+    var cats = DATA.multiples.categories.slice().sort(function (a, b) {
+      if (a.multiple !== b.multiple) return b.multiple - a.multiple;
+      return a.category < b.category ? -1 : 1;
+    });
+    var tbody = el('tbody');
+    cats.forEach(function (c) {
+      tbody.appendChild(el('tr', null,
+        el('td', { text: c.category }),
+        el('td', { class: 'num', text: String(c.comparables) }),
+        el('td', { class: 'num', text: c.raw_median === null ? 'n/a' : String(c.raw_median) }),
+        el('td', { class: 'num' }, el('b', { text: String(c.multiple) })),
+        el('td', null, c.fallback ? el('span', { class: 'fb', text: 'fallback — fewer than 2 live comparables' }) : el('span', { class: 'sub', text: 'shrunk toward ' + DATA.multiples.overall_median + ' (k=' + m.shrinkage_k + ')' }))
+      ));
+    });
+    var noEv = noEvidenceCategories();
+    var note = noEv.length === 0 ? '' : ' Categories with no live comparable at all — ' + noEv.join(', ') + ' — also use the overall median ' + DATA.multiples.overall_median + '.';
+    return el('div', { class: 'mult-table' },
+      el('table', null,
+        el('caption', { text: 'Category multiples, computed from the ' + DATA.multiples.live_comparables + ' live-token protocols in this snapshot (overall median mcap/TVL ' + DATA.multiples.overall_median + ').' + note }),
+        el('thead', null, el('tr', null,
+          el('th', { scope: 'col', text: 'Category' }),
+          el('th', { scope: 'col', text: 'Live comparables' }),
+          el('th', { scope: 'col', text: 'Raw median mcap/TVL' }),
+          el('th', { scope: 'col', text: 'Multiple applied' }),
+          el('th', { scope: 'col', text: 'Derivation' })
+        )),
+        tbody
+      )
+    );
+  }
+
   function modelPanel() {
     var m = DATA.model;
     return el('section', { class: 'panel model' },
       el('h2', { text: 'How implied value is computed' }),
-      el('p', { class: 'sub', text: 'Every row is scored by one function of the snapshot figures. No protocol name is special-cased, and no row is hand-picked.' }),
+      el('p', { text: 'Every row is scored by one function of the snapshot figures. No protocol name is special-cased, and no row is hand-picked. The multiple is where the model learns from the market: categories whose tokens capture more value per dollar of TVL get a higher multiple, and the shrinkage keeps small samples honest.' }),
       el('div', { class: 'formula' },
         'implied = round( tvl_usd x multiple(category) x (1 + clamp(change_7d, ' + m.growth_floor + ', ' + m.growth_cap + ') / 100 x ' + m.growth_weight + ') x (' + m.maturity_floor + ' + min(age_days, ' + m.maturity_days + ') / ' + m.maturity_days + ' x ' + m.maturity_range + ') )'
       ),
-      el('p', { class: 'sub', text: 'multiple(category) = clamp( (n x category median + ' + m.shrinkage_k + ' x overall median) / (n + ' + m.shrinkage_k + '), ' + m.multiple_min + ', ' + m.multiple_max + ' ), where the medians are mcap/TVL ratios of the ' + DATA.multiples.live_comparables + ' live-token protocols in this snapshot (overall median ' + DATA.multiples.overall_median + '). A category with fewer than two live comparables gets the overall median: one data point is not a category pattern. TVL and seven-day growth come from the snapshot. Age is the time since the protocol was first listed, the best record of how long it has run with no token; an unlisted age uses ' + m.unknown_age_days + ' days. The live-token protocols are set aside with their market caps shown.' })
+      el('p', { text: 'multiple(category) = clamp( (n x category median + ' + m.shrinkage_k + ' x overall median) / (n + ' + m.shrinkage_k + '), ' + m.multiple_min + ', ' + m.multiple_max + ' ), where the medians are mcap/TVL ratios of the live-token protocols in this snapshot. A category with fewer than two live comparables gets the overall median: one data point is not a category pattern. TVL and seven-day growth come from the snapshot. Age is the time since the protocol was first listed, the best record of how long it has run with no token; an unlisted age uses ' + m.unknown_age_days + ' days. The live-token protocols are set aside with their market caps shown.' }),
+      multiplesTable()
+    );
+  }
+
+  // One row's multiple, derived in words: the evidence behind the number.
+  function derivationText(row) {
+    var cat = row.category || 'Other';
+    var entry = multipleEntry(row.category);
+    var overall = DATA.multiples.overall_median;
+    var k = DATA.model.shrinkage_k;
+    if (!entry) {
+      return [el('b', { text: cat + ' — no live comparables. ' }), 'No live-token protocol in this category carries a market cap in this snapshot, so the model applies the overall median ' + overall + '. The category adds no evidence of its own; the ranking rests on TVL, growth and age.'];
+    }
+    if (entry.fallback) {
+      return [el('b', { text: cat + ' — fallback. ' }), 'Only ' + entry.comparables + ' live comparable in this snapshot, so the model applies the overall median ' + overall + ' instead of the raw median ' + entry.raw_median + ': one data point is not a category pattern.'];
+    }
+    return [el('b', { text: cat + ' — ' + entry.comparables + ' live comparables. ' }), 'Median mcap/TVL ' + entry.raw_median + ' across those comparables, shrunk toward the overall median ' + overall + ' with k=' + k + ' and clamped to [' + DATA.model.multiple_min + ', ' + DATA.model.multiple_max + '], gives the multiple ' + entry.multiple + ' this row was scored with.'];
+  }
+
+  // Why this row ranks where it does, generated from the model's own inputs.
+  function whyHere(row) {
+    var byTvl = DATA.rows.slice().sort(function (a, b) { return b.tvl_usd - a.tvl_usd; });
+    var tvlRank = byTvl.findIndex(function (r) { return r.slug === row.slug; }) + 1;
+    var overall = DATA.multiples.overall_median;
+    var mult = row.category_multiple;
+    var multPart = mult > overall
+      ? 'its ' + (row.category || 'Other') + ' multiple of ' + mult + ' is above the overall median ' + overall + ', so each dollar of TVL counts for more'
+      : mult < overall
+        ? 'its ' + (row.category || 'Other') + ' multiple of ' + mult + ' is below the overall median ' + overall + ', so each dollar of TVL counts for less'
+        : 'its ' + (row.category || 'Other') + ' multiple is the overall median ' + overall + ' (no category evidence of its own)';
+    var growthPart = row.change_7d === null
+      ? 'no seven-day growth is recorded'
+      : row.change_7d >= 0
+        ? 'seven-day growth of +' + row.change_7d.toFixed(2) + '% lifts it (multiplier ' + row.growth_multiplier + ')'
+        : 'seven-day growth of ' + row.change_7d.toFixed(2) + '% pulls it down (multiplier ' + row.growth_multiplier + ')';
+    var agePart = row.age_days === null
+      ? 'its age is unlisted, so the model assumes ' + DATA.model.unknown_age_days + ' days'
+      : 'it has run ' + fmtAge(row.age_days) + ' with no token (maturity multiplier ' + row.maturity_multiplier + ')';
+    return el('p', { class: 'why' },
+      el('b', { text: 'Why #' + row.rank + ': ' }),
+      'its ' + fmtUsd(row.tvl_usd) + ' of TVL is the ' + tvlRank + (tvlRank === 1 ? 'st' : tvlRank === 2 ? 'nd' : tvlRank === 3 ? 'rd' : 'th') + ' largest on the board; ' + multPart + '; ' + growthPart + '; and ' + agePart + '.'
     );
   }
 
@@ -315,12 +446,15 @@
       el('h3', { text: 'Implied value' }),
       el('div', { class: 'equation' },
         el('div', null, el('span', { text: 'TVL' }), el('b', { class: 'num', text: fmtUsd(row.tvl_usd) })),
+        el('div', null, el('span', { text: 'Category multiple' }), el('b', { class: 'num', text: String(row.category_multiple) })),
         el('div', null, el('span', { text: 'Seven-day growth' }), el('b', { class: 'num', text: fmtPct(row.change_7d) })),
         el('div', null, el('span', { text: 'Age with no token' }), el('b', { class: 'num', text: fmtAge(row.age_days) })),
         el('div', null, el('span', { text: 'Growth multiplier' }), el('b', { class: 'num', text: String(row.growth_multiplier) })),
         el('div', null, el('span', { text: 'Maturity multiplier' }), el('b', { class: 'num', text: String(row.maturity_multiplier) })),
         el('div', null, el('span', { text: 'Implied value' }), el('b', { class: 'num', text: fmtUsd(row.implied_value_usd) }))
       ),
+      el('div', { class: 'derivation' }, derivationText(row)),
+      whyHere(row),
       el('p', { class: 'sub', text: 'Model ' + DATA.model_version + ': the same function scores every protocol. The page recomputes this row as ' + fmtUsd(impliedOf(row, DATA.model)) + (impliedOf(row, DATA.model) === row.implied_value_usd ? ', the same number board.json carries.' : ', which differs from the board: the data would be stale.') + ' This is an estimate, not a price.' })
     ));
     dialog.appendChild(el('section', { class: 'detail-section' },
@@ -344,6 +478,7 @@
     var shell = el('div', { class: 'shell' });
     shell.appendChild(header());
     shell.appendChild(lede());
+    if (state.tab === 'pre-token') shell.appendChild(topStrip());
     shell.appendChild(controls());
     shell.appendChild(state.tab === 'pre-token' ? boardTable() : liveTable());
     if (state.tab === 'pre-token') shell.appendChild(modelPanel());
