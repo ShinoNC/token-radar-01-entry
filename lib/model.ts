@@ -14,7 +14,10 @@
 //     catMedian     = median mcap/TVL of the LIVE-token protocols in the category
 //     overallMedian = median mcap/TVL across all live-token protocols in the snapshot
 //     n = live comparables in the category, k = 8 (shrinkage strength)
-//     a category with no live comparables gets the overall median, honestly
+//     a category with fewer than two live comparables gets the overall median, honestly:
+//     one data point is not a category pattern — it is one protocol's ratio, and letting it
+//     move the multiple would rank a whole category on a single observation (Risk Curators'
+//     lone comparable, api3 at 2.975, would otherwise put 8 of the top 13 rows in one category)
 //   base       = tvl_usd x multiple(category)
 //   growth     = clamp(change_7d, -60, 120) per cent
 //   growthMult = 1 + (growth / 100) x GROWTH_WEIGHT
@@ -57,6 +60,8 @@ export interface ModelConstants {
   multiple_max: number;
   /** The shrinkage strength: each category median is pulled toward the overall median by k pseudo-observations. */
   shrinkage_k: number;
+  /** The minimum live comparables before a category's own median counts at all: below this, the overall median applies. */
+  min_comparables: number;
   growth_weight: number;
   growth_floor: number;
   growth_cap: number;
@@ -70,6 +75,7 @@ export const MODEL: ModelConstants = {
   multiple_min: 0.05,
   multiple_max: 0.5,
   shrinkage_k: 8,
+  min_comparables: 2,
   growth_weight: 0.5,
   growth_floor: -60,
   growth_cap: 120,
@@ -80,7 +86,7 @@ export const MODEL: ModelConstants = {
 };
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-2';
+export const MODEL_VERSION = 'radar-2.1';
 
 /** How many live-token protocols the Live token view carries, by market cap. */
 export const LIVE_ROWS = 24;
@@ -158,6 +164,8 @@ export interface CategoryMultiple {
   raw_median: number | null;
   /** The shrunk multiple the model applies, after the clamp. */
   multiple: number;
+  /** True when the multiple is the overall-median fallback (fewer than min_comparables live comparables). */
+  fallback?: boolean;
 }
 
 /** The multiples table the model computed from the snapshot, for the dashboard. */
@@ -248,6 +256,18 @@ export function computeMultiples(snapshot: Snapshot, model: ModelConstants = MOD
       ratios.sort((a, b) => a - b);
       const rawMedian = medianOf(ratios);
       const n = ratios.length;
+      // One comparable is not a pattern: below the threshold the category's own median is ignored
+      // and the overall median applies, exactly as for a category with no comparables at all. The
+      // raw median stays in the table, so the thin evidence is visible rather than hidden.
+      if (n < model.min_comparables) {
+        return {
+          category,
+          comparables: n,
+          raw_median: round4(rawMedian),
+          multiple: round4(overallMedian),
+          fallback: true,
+        };
+      }
       const shrunk = (n * rawMedian + model.shrinkage_k * overallMedian) / (n + model.shrinkage_k);
       return {
         category,
