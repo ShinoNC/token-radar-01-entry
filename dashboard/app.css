@@ -81,29 +81,29 @@ a { color: var(--accent); }
 .top-meta b { color: var(--ink); font-weight: 600; font-family: var(--font-num); font-size: 12px; }
 
 /* Lede: headline left, four stat blocks in a row beneath it. */
-.lede { padding: var(--step-6) 0 var(--step-5); }
+.lede { padding: var(--step-4) 0 var(--step-3); }
 .lede .kicker { font-family: var(--font-num); font-size: 12px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--accent); margin-bottom: var(--step-2); }
 .lede p { color: var(--muted); max-width: 72ch; margin-top: var(--step-3); font-size: 16px; }
-.stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--step-3); margin-top: var(--step-5); }
-.stat { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-card); padding: var(--step-4); }
-.stat b { display: block; font-family: var(--font-num); font-size: 24px; font-weight: 600; line-height: 1.1; }
+.stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--step-3); margin-top: var(--step-4); }
+.stat { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-card); padding: var(--step-3) var(--step-4); }
+.stat b { display: block; font-family: var(--font-num); font-size: 22px; font-weight: 600; line-height: 1.1; }
 .stat span { display: block; color: var(--muted); font-size: 12px; margin-top: var(--step-1); }
 .stat.amber b { color: var(--accent); }
 
-/* Top-10 strip: ten cards, five across, the board's best at a glance. */
-.strip-head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--step-4); margin: var(--step-5) 0 var(--step-3); }
+/* Top-5 strip: five cards in one row, the board's best at a glance. */
+.strip-head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--step-4); margin: var(--step-4) 0 var(--step-3); }
 .strip-head .sub { color: var(--muted); font-size: 13px; }
 .strip { display: grid; grid-template-columns: repeat(5, 1fr); gap: var(--step-3); }
 .card {
   text-align: left; background: var(--surface); border: 1px solid var(--border);
-  border-radius: var(--radius-card); padding: var(--step-4); min-width: 0;
+  border-radius: var(--radius-card); padding: var(--step-3) var(--step-4); min-width: 0;
   display: grid; gap: var(--step-1); transition: border-color 120ms ease, background 120ms ease;
 }
 .card:hover, .card:focus-visible { border-color: var(--accent); background: var(--hover); }
 .card .rank { font-family: var(--font-num); font-size: 12px; color: var(--accent); font-weight: 600; letter-spacing: 0.08em; }
 .card .cname { font-weight: 650; font-size: 15px; line-height: 1.25; overflow-wrap: anywhere; }
 .card .cmeta { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.card .cvalue { font-family: var(--font-num); font-size: 19px; font-weight: 600; margin-top: var(--step-1); }
+.card .cvalue { font-family: var(--font-num); font-size: 17px; font-weight: 600; margin-top: var(--step-1); }
 .card .cvalue span { display: block; font-size: 11px; color: var(--muted); font-weight: 400; letter-spacing: 0.06em; text-transform: uppercase; }
 .card .ctvl { color: var(--muted); font-size: 12px; font-family: var(--font-num); }
 .chip { display: inline-block; font-family: var(--font-num); font-size: 11px; padding: 1px 6px; border-radius: 20px; }
@@ -111,7 +111,7 @@ a { color: var(--accent); }
 .chip.neg { color: var(--negative); background: rgba(224, 108, 90, 0.12); }
 
 /* Controls: search, two filters, tabs, count. */
-.controls { display: flex; flex-wrap: wrap; align-items: end; gap: var(--step-3); padding: var(--step-4) 0; border-top: 1px solid var(--border); margin-top: var(--step-5); }
+.controls { display: flex; flex-wrap: wrap; align-items: end; gap: var(--step-3); padding: var(--step-3) 0; border-top: 1px solid var(--border); margin-top: var(--step-4); }
 .field { display: grid; gap: var(--step-1); }
 .field label { color: var(--muted); font-size: 12px; }
 .field input, .field select {
@@ -200,8 +200,9 @@ tbody tr[data-selected="true"] { background: var(--accent-dim); }
 .steps b { display: block; font-weight: 500; }
 .cost { color: var(--muted); font-size: 12px; font-family: var(--font-num); }
 
-/* Farm verdicts: green pays, amber thin, red skip. */
+/* Farm verdicts: solid green pays even at the band's low end, green pays, amber thin, red skip. */
 .verdict { display: inline-block; font-family: var(--font-num); font-size: 11px; font-weight: 600; letter-spacing: 0.08em; padding: 2px 8px; border-radius: 20px; white-space: nowrap; }
+.verdict.robust { color: #0d1417; background: var(--positive); }
 .verdict.farm { color: var(--positive); background: rgba(87, 201, 138, 0.14); }
 .verdict.thin { color: var(--accent); background: var(--accent-dim); }
 .verdict.skip { color: var(--negative); background: rgba(224, 108, 90, 0.14); }

@@ -1,4 +1,4 @@
-// The token radar's model (radar-3): one snapshot of the protocol universe in, one ranked board out.
+// The token radar's model (radar-4): one snapshot of the protocol universe in, one ranked board out.
 //
 // The board covers every slug in the snapshot's watchlist (the floor, never a ceiling) and every other
 // pre-token protocol the watchlist's own exclusion rule would keep: no wrapped, staked, bridged or
@@ -13,7 +13,7 @@
 // instead of applying one flat multiple:
 //
 //   log10(mcap) = a + b x log10(tvl_usd)          (ordinary least squares over the comparables)
-//   offset(cat) = shrunk median residual of the category's comparables (k = 4, n >= 2 or 0)
+//   offset(cat) = shrunk median residual of the category's comparables (k = 4, n >= 3 or 0)
 //   base       = 10 ^ (a + b x log10(tvl_usd) + offset(category))
 //   growth     = clamp(change_7d, -60, 120) per cent
 //   growthMult = 1 + (growth / 100) x GROWTH_WEIGHT
@@ -28,8 +28,10 @@
 //
 // Farm economics: a $1,000 plan's slice is what $1,000 deposited would get if 10% of the launch goes
 // to depositors pro rata (slice = 1000/TVL x 10% x implied). Net = slice - gas fees - the 4% T-bill
-// yield the capital gives up over the hold. FARM pays after fees and the T-bill; THIN beats its fees
-// only; SKIP loses to its fees. The verdict is arithmetic, not a slogan.
+// yield the capital gives up over the hold. The plan is netted TWICE: at the implied value and at the
+// band's low end, so a verdict survives the model's own uncertainty. ROBUST pays even at the band's
+// low end; FARM pays at the implied value; THIN beats its fees only; SKIP loses to its fees. The
+// verdict is arithmetic, not a slogan.
 
 /** The snapshot's protocol entry: exactly the ten fields the sealed input carries. */
 export interface SnapshotProtocol {
@@ -80,7 +82,7 @@ export interface ModelConstants {
 
 export const MODEL: ModelConstants = {
   shrinkage_k: 4,
-  min_comparables: 2,
+  min_comparables: 3,
   growth_weight: 0.5,
   growth_floor: -60,
   growth_cap: 120,
@@ -96,7 +98,7 @@ export const MODEL: ModelConstants = {
 };
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-3';
+export const MODEL_VERSION = 'radar-4';
 
 /** How many live-token protocols the Live token view carries, by market cap. */
 export const LIVE_ROWS = 24;
@@ -112,20 +114,26 @@ export interface FarmStep {
 export interface FarmEconomics {
   /** What the plan capital deposited would get if the airdrop share goes to depositors pro rata. */
   slice_usd: number;
+  /** The same slice at the prediction band's low end: what the plan gets if the launch is worth the model's low estimate. */
+  slice_low_usd: number;
   /** All gas the plan pays: setup (2 tx) + one weekly action per hold week. */
   fees_usd: number;
   /** The T-bill yield the capital gives up over the hold. */
   tbill_usd: number;
   /** slice - fees - T-bill: what the plan nets after every cost. */
   net_usd: number;
+  /** slice_low - fees - T-bill: what the plan nets if the launch is worth the band's low end. */
+  net_low_usd: number;
   /** slice - fees: what the plan nets before the opportunity cost. */
   net_after_fees_usd: number;
-  /** FARM pays after fees and the T-bill; THIN beats its fees only; SKIP loses to its fees. */
-  verdict: 'FARM' | 'THIN' | 'SKIP';
+  /** ROBUST pays even at the band's low end; FARM pays at the implied value; THIN beats its fees only; SKIP loses to its fees. */
+  verdict: 'ROBUST' | 'FARM' | 'THIN' | 'SKIP';
   /** Net per hands-on hour (setup + weekly actions + claim + log). */
   net_per_hour_usd: number;
   /** The smallest capital at which the plan nets above zero, or null when it never does. */
   pays_from_usd: number | null;
+  /** The implied value at which the plan breaks even (slice = fees + T-bill), or null when the slice rate is zero. */
+  breakeven_implied_usd: number | null;
   /** Hands-on hours the plan takes, in total. */
   hours: number;
 }
@@ -589,7 +597,7 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL, fi
       maturity_multiplier: round4(s.maturityMult),
       age_days: s.age,
     },
-    economics: farmEconomics(s.p, s.implied, s.age, model),
+    economics: farmEconomics(s.p, s.implied, s.age, model, test.band_low_mult),
     farm_steps: farmSteps(s.p, s.age).map(stepText),
   }));
 }
@@ -767,37 +775,48 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
  * get if the airdrop share of the launch goes to depositors pro rata: slice = capital/TVL x share x
  * implied. The fees are the plan's own gas (setup + one weekly action per hold week, priced on the
  * protocol's first chain). The T-bill cost is the risk-free yield the capital gives up over the hold.
- * The verdict follows from the arithmetic: FARM nets above zero after every cost; THIN beats its fees
- * but not the T-bill; SKIP loses to its fees alone. Pays-from is the smallest capital at which the
- * plan nets above zero — the slice and the T-bill cost both scale with capital, the fees do not.
+ * The plan is netted TWICE: at the implied value and at the band's low end (bandLowMult, the P25
+ * multiplier from the backtest). The verdict follows from the arithmetic: ROBUST nets above zero even
+ * at the band's low end; FARM nets above zero at the implied value; THIN beats its fees but not the
+ * T-bill; SKIP loses to its fees alone. Pays-from is the smallest capital at which the plan nets above
+ * zero — the slice and the T-bill cost both scale with capital, the fees do not. Break-even is the
+ * implied value at which the slice exactly covers fees + T-bill.
  */
-export function farmEconomics(p: SnapshotProtocol, implied: number, age: number | null, model: ModelConstants = MODEL): FarmEconomics {
+export function farmEconomics(p: SnapshotProtocol, implied: number, age: number | null, model: ModelConstants = MODEL, bandLowMult: number = 1): FarmEconomics {
   const capital = model.plan_capital;
   const hold = holdDaysFor(age);
   const gas = gasPerTx(chainOf(p));
   const weeks = Math.max(1, Math.ceil(hold / 7));
   const slice = (capital / Math.max(p.tvl_usd, 1)) * model.airdrop_share * implied;
+  const sliceLow = slice * bandLowMult;
   const fees = gas * 2 + gas * weeks;
   const tbill = capital * model.tbill_rate * (hold / 365);
   const net = slice - fees - tbill;
+  const netLow = sliceLow - fees - tbill;
   const netAfterFees = slice - fees;
-  const verdict: FarmEconomics['verdict'] = net > 0 ? 'FARM' : netAfterFees > 0 ? 'THIN' : 'SKIP';
+  const verdict: FarmEconomics['verdict'] = netLow > 0 ? 'ROBUST' : net > 0 ? 'FARM' : netAfterFees > 0 ? 'THIN' : 'SKIP';
   const hours = 0.25 + weeks * (10 / 60) + 10 / 60 + 5 / 60;
   // Net as a function of capital: capital x (sliceRate - tbillRate) - fees. It crosses zero at
   // fees / (sliceRate - tbillRate) when the slice rate beats the T-bill rate; otherwise never.
   const sliceRate = (model.airdrop_share * implied) / Math.max(p.tvl_usd, 1);
   const tbillRate = model.tbill_rate * (hold / 365);
   const paysFrom = sliceRate > tbillRate ? Math.ceil((fees / (sliceRate - tbillRate)) / 10) * 10 : null;
+  // Break-even implied value: the launch value at which slice = fees + T-bill.
+  // slice = capital/TVL x share x implied, so implied* = (fees + tbill) x TVL / (capital x share).
+  const breakeven = Math.ceil(((fees + tbill) * Math.max(p.tvl_usd, 1)) / (capital * model.airdrop_share));
   const round2 = (n: number): number => Math.round(n * 100) / 100;
   return {
     slice_usd: round2(slice),
+    slice_low_usd: round2(sliceLow),
     fees_usd: round2(fees),
     tbill_usd: round2(tbill),
     net_usd: round2(net),
+    net_low_usd: round2(netLow),
     net_after_fees_usd: round2(netAfterFees),
     verdict,
     net_per_hour_usd: round2(net / hours),
     pays_from_usd: paysFrom,
+    breakeven_implied_usd: breakeven,
     hours: round2(hours),
   };
 }

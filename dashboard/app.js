@@ -170,7 +170,7 @@
   }
   // Verdict counts across the board, for the lede and the filter.
   function verdictCounts() {
-    var counts = { FARM: 0, THIN: 0, SKIP: 0 };
+    var counts = { ROBUST: 0, FARM: 0, THIN: 0, SKIP: 0 };
     DATA.rows.forEach(function (r) { if (counts[r.economics.verdict] !== undefined) counts[r.economics.verdict]++; });
     return counts;
   }
@@ -237,23 +237,29 @@
     );
   }
 
+  function bestHour() {
+    var best = DATA.rows.slice().sort(function (a, b) { return b.economics.net_per_hour_usd - a.economics.net_per_hour_usd; }).slice(0, 2);
+    if (best.length === 0 || best[0].economics.net_per_hour_usd <= 0) return null;
+    return 'Best hands-on hour: ' + best.map(function (r) { return r.name + ' ' + fmtSigned(r.economics.net_per_hour_usd) + '/h'; }).join(' · ');
+  }
+
   function lede() {
     var v = verdictCounts();
     return el('section', { class: 'lede' },
       el('div', { class: 'kicker', text: 'Pre-token radar · ' + DATA.as_of }),
       el('h1', { text: 'The next token launches, ranked before they exist' }),
-      el('p', { text: 'Every implied value is read off the ' + DATA.curve.comparables + ' tokens that already trade: a size curve fitted to their market caps, tested out of sample before it is believed. Each row carries its prediction band and a farm plan netted to the dollar at $1,000 — FARM pays after fees and a 4% T-bill, THIN beats its fees only, SKIP loses to its fees. No name is hand-picked.' }),
+      el('p', { text: 'Every implied value is read off the ' + DATA.curve.comparables + ' tokens that already trade: a size curve fitted to their market caps, tested out of sample.' }),
       el('div', { class: 'stats' },
         el('div', { class: 'stat amber' }, el('b', { text: DATA.watchlist_size + ' / ' + DATA.watchlist_size }), el('span', { text: 'Watchlist protocols covered' })),
         el('div', { class: 'stat' }, el('b', { text: String(DATA.board_size) }), el('span', { text: 'Pre-token rows scored' })),
         el('div', { class: 'stat' }, el('b', { text: 'x' + DATA.backtest.curve_median_miss }), el('span', { text: 'Leave-one-out error (flat multiple: x' + DATA.backtest.flat_median_miss + ')' })),
-        el('div', { class: 'stat' }, el('b', { text: v.FARM + ' · ' + v.THIN + ' · ' + v.SKIP }), el('span', { text: 'FARM · THIN · SKIP verdicts at $1,000' }))
+        el('div', { class: 'stat' }, el('b', { text: v.ROBUST + ' · ' + v.FARM + ' · ' + v.THIN + ' · ' + v.SKIP }), el('span', { text: 'ROBUST · FARM · THIN · SKIP verdicts at $1,000' }))
       )
     );
   }
 
   function topStrip() {
-    var cards = topRows(10).map(function (r) {
+    var cards = topRows(5).map(function (r) {
       var growth = r.change_7d === null ? null : el('span', { class: 'chip ' + (r.change_7d >= 0 ? 'pos' : 'neg'), text: fmtPct(r.change_7d) + ' 7d' });
       return el('button', { class: 'card', type: 'button', 'aria-label': 'Rank ' + r.rank + ': ' + r.name + ', implied value ' + fmtUsd(r.implied_value_usd), onclick: function () { openDetail(r.slug); } },
         el('span', { class: 'rank', text: '#' + r.rank }),
@@ -264,10 +270,10 @@
         growth
       );
     });
-    return el('section', { 'aria-label': 'Top 10 by implied value' },
+    return el('section', { 'aria-label': 'Top 5 by implied value' },
       el('div', { class: 'strip-head' },
-        el('h2', { text: 'Top 10 by implied value' }),
-        el('span', { class: 'sub', text: 'Select a card for its model and farm plan' })
+        el('h2', { text: 'Top 5 by implied value' }),
+        el('span', { class: 'sub', text: bestHour() || 'Select a card for its model and farm plan' })
       ),
       el('div', { class: 'strip' }, cards)
     );
@@ -290,20 +296,23 @@
     chainSelect.addEventListener('change', function () { state.chain = chainSelect.value; writeHash(); render(); });
     var verdictSelect = el('select', { id: 'verdict', 'aria-label': 'Filter by farm verdict' },
       el('option', { value: 'all', text: 'All verdicts' }),
-      ['FARM', 'THIN', 'SKIP'].map(function (v) { return el('option', { value: v, text: v, selected: v === state.verdict ? 'selected' : null }); })
+      ['ROBUST', 'FARM', 'THIN', 'SKIP'].map(function (v) { return el('option', { value: v, text: v, selected: v === state.verdict ? 'selected' : null }); })
     );
     verdictSelect.addEventListener('change', function () { state.verdict = verdictSelect.value; writeHash(); render(); });
     var pre = el('button', { type: 'button', 'aria-pressed': state.tab === 'pre-token' ? 'true' : 'false', text: 'Pre-token', onclick: function () { state.tab = 'pre-token'; render(); } });
     var live = el('button', { type: 'button', 'aria-pressed': state.tab === 'live' ? 'true' : 'false', text: 'Live token', onclick: function () { state.tab = 'live'; render(); } });
     var aside = el('button', { type: 'button', 'aria-pressed': state.tab === 'set-aside' ? 'true' : 'false', text: 'Set aside', onclick: function () { state.tab = 'set-aside'; render(); } });
     var method = el('button', { type: 'button', 'aria-pressed': state.tab === 'method' ? 'true' : 'false', text: 'Method', onclick: function () { state.tab = 'method'; render(); } });
+    // The page recomputes every row from the snapshot figures: the count proves
+    // the page and board.json agree, row for row.
+    var matched = DATA.rows.filter(function (r) { return impliedOf(r, DATA.model, DATA.curve) === r.implied_value_usd; }).length;
     return el('div', { class: 'controls' },
       el('div', { class: 'field' }, el('label', { for: 'q', text: 'Search' }), search),
       el('div', { class: 'field' }, el('label', { for: 'category', text: 'Category' }), catSelect),
       el('div', { class: 'field' }, el('label', { for: 'chain', text: 'Chain' }), chainSelect),
       el('div', { class: 'field' }, el('label', { for: 'verdict', text: 'Verdict' }), verdictSelect),
       el('div', { class: 'field' }, el('span', { class: 'sub', text: 'View' }), el('div', { class: 'tabs' }, pre, live, aside, method)),
-      el('span', { class: 'count', text: state.tab === 'pre-token' ? rows().length + ' rows shown' : state.tab === 'live' ? DATA.live.length + ' live-token protocols' : state.tab === 'set-aside' ? DATA.set_aside_size + ' protocols set aside' : 'How the radar is built and tested' })
+      el('span', { class: 'count', text: state.tab === 'pre-token' ? rows().length + ' rows shown · page = board.json: ' + matched + '/' + DATA.rows.length + ' match' : state.tab === 'live' ? DATA.live.length + ' live-token protocols' : state.tab === 'set-aside' ? DATA.set_aside_size + ' protocols set aside' : 'How the radar is built and tested' })
     );
   }
 
@@ -334,7 +343,7 @@
       var growth = r.change_7d === null ? 'n/a' : fmtPct(r.change_7d);
       var growthClass = r.change_7d === null ? '' : r.change_7d >= 0 ? 'pos' : 'neg';
       var e = r.economics;
-      var verdictClass = e.verdict === 'FARM' ? 'farm' : e.verdict === 'THIN' ? 'thin' : 'skip';
+      var verdictClass = e.verdict === 'ROBUST' ? 'robust' : e.verdict === 'FARM' ? 'farm' : e.verdict === 'THIN' ? 'thin' : 'skip';
       var tr = el('tr', {
         'data-selected': state.selected === r.slug ? 'true' : 'false',
         tabindex: '0',
@@ -443,7 +452,7 @@
         el('td', { class: 'num', text: String(c.comparables) }),
         el('td', { class: 'num', text: c.raw_median === null ? 'n/a' : (c.raw_median >= 0 ? '+' : '') + c.raw_median }),
         el('td', { class: 'num' }, el('b', { text: (c.offset >= 0 ? '+' : '') + c.offset + ' (x' + Math.pow(10, c.offset).toFixed(2) + ')' })),
-        el('td', null, c.fallback ? el('span', { class: 'fb', text: 'offset 0 — fewer than 2 live comparables' }) : el('span', { class: 'sub', text: 'shrunk toward 0 (k=' + m.shrinkage_k + ')' }))
+        el('td', null, c.fallback ? el('span', { class: 'fb', text: 'offset 0 — fewer than ' + m.min_comparables + ' live comparables' }) : el('span', { class: 'sub', text: 'shrunk toward 0 (k=' + m.shrinkage_k + ')' }))
       ));
     });
     var noEv = noEvidenceCategories();
@@ -546,7 +555,7 @@
       el('div', { class: 'formula' },
         'implied = round( 10 ^ (' + c.intercept + ' + ' + c.slope + ' x log10(tvl_usd) + offset(category)) x (1 + clamp(change_7d, ' + m.growth_floor + ', ' + m.growth_cap + ') / 100 x ' + m.growth_weight + ') x (' + m.maturity_floor + ' + min(age_days, ' + m.maturity_days + ') / ' + m.maturity_days + ' x ' + m.maturity_range + ') )'
       ),
-      el('p', { text: 'offset(category) is the median log10 residual of the category\u2019s live comparables against the curve, shrunk toward 0 with k=' + m.shrinkage_k + '. A category with fewer than ' + m.min_comparables + ' live comparables gets offset 0: one data point is not a category pattern. TVL and seven-day growth come from the snapshot. Age is the time since the protocol was first listed, the best record of how long it has run with no token; an unlisted age uses ' + m.unknown_age_days + ' days. The live-token protocols are set aside with their market caps shown.' }),
+      el('p', { text: 'offset(category) is the median log10 residual of the category\u2019s live comparables against the curve, shrunk toward 0 with k=' + m.shrinkage_k + '. A category with fewer than ' + m.min_comparables + ' live comparables gets offset 0: the evidence is too thin to move the board. TVL and seven-day growth come from the snapshot. Age is the time since the protocol was first listed, the best record of how long it has run with no token; an unlisted age uses ' + m.unknown_age_days + ' days. The live-token protocols are set aside with their market caps shown.' }),
       offsetsTable()
     );
   }
@@ -560,7 +569,11 @@
       return [el('b', { text: cat + ' — no live comparables. ' }), 'No live-token protocol in this category carries a market cap in this snapshot, so the model applies offset 0: the curve alone prices this row. The category adds no evidence of its own; the ranking rests on TVL, growth and age.'];
     }
     if (entry.fallback) {
-      return [el('b', { text: cat + ' — offset 0. ' }), 'Only ' + entry.comparables + ' live comparable in this snapshot, so the model applies offset 0 instead of the raw median residual ' + entry.raw_median + ': one data point is not a category pattern.'];
+      var n = entry.comparables;
+      var tail = n === 1
+        ? 'Only 1 live comparable in this snapshot, so the model applies offset 0 instead of the raw median residual ' + entry.raw_median + ': one data point is not a category pattern.'
+        : 'Only ' + n + ' live comparables in this snapshot — fewer than the ' + DATA.model.min_comparables + ' the model requires — so the model applies offset 0 instead of the raw median residual ' + entry.raw_median + '.';
+      return [el('b', { text: cat + ' — offset 0. ' }), tail];
     }
     return [el('b', { text: cat + ' — ' + entry.comparables + ' live comparables. ' }), 'Median log10 residual ' + entry.raw_median + ' against the curve, shrunk toward 0 with k=' + k + ', gives the offset ' + entry.offset + ' (x' + Math.pow(10, entry.offset).toFixed(2) + ') this row was scored with.'];
   }
@@ -625,24 +638,29 @@
       el('p', { class: 'sub', text: 'Model ' + DATA.model_version + ': the same function scores every protocol. The page recomputes this row as ' + fmtUsd(impliedOf(row, DATA.model, DATA.curve)) + (impliedOf(row, DATA.model, DATA.curve) === row.implied_value_usd ? ', the same number board.json carries.' : ', which differs from the board: the data would be stale.') + ' This is an estimate, not a price.' })
     ));
     var econ = row.economics;
-    var verdictClass = econ.verdict === 'FARM' ? 'farm' : econ.verdict === 'THIN' ? 'thin' : 'skip';
+    var verdictClass = econ.verdict === 'ROBUST' ? 'robust' : econ.verdict === 'FARM' ? 'farm' : econ.verdict === 'THIN' ? 'thin' : 'skip';
     dialog.appendChild(el('section', { class: 'detail-section' },
       el('h3', { text: 'Farm economics at $1,000' }),
       el('div', { class: 'equation' },
         el('div', null, el('span', { text: '$1K slice' }), el('b', { class: 'num', text: '$' + econ.slice_usd.toFixed(2) })),
+        el('div', null, el('span', { text: 'Slice at the band\u2019s low end' }), el('b', { class: 'num', text: '$' + econ.slice_low_usd.toFixed(2) })),
         el('div', null, el('span', { text: 'Gas fees' }), el('b', { class: 'num', text: '$' + econ.fees_usd.toFixed(2) })),
         el('div', null, el('span', { text: 'T-bill yield given up' }), el('b', { class: 'num', text: '$' + econ.tbill_usd.toFixed(2) })),
         el('div', null, el('span', { text: 'Net of all costs' }), el('b', { class: 'num ' + (econ.net_usd >= 0 ? 'pos' : 'neg'), text: fmtSigned(econ.net_usd) })),
+        el('div', null, el('span', { text: 'Net at the band\u2019s low end' }), el('b', { class: 'num ' + (econ.net_low_usd >= 0 ? 'pos' : 'neg'), text: fmtSigned(econ.net_low_usd) })),
         el('div', null, el('span', { text: 'Net per hands-on hour' }), el('b', { class: 'num ' + (econ.net_per_hour_usd >= 0 ? 'pos' : 'neg'), text: fmtSigned(econ.net_per_hour_usd) + '/h' })),
-        el('div', null, el('span', { text: 'Pays from' }), el('b', { class: 'num', text: econ.pays_from_usd === null ? 'never' : '$' + econ.pays_from_usd }))
+        el('div', null, el('span', { text: 'Pays from' }), el('b', { class: 'num', text: econ.pays_from_usd === null ? 'never' : '$' + econ.pays_from_usd })),
+        el('div', null, el('span', { text: 'Break-even implied value' }), el('b', { class: 'num', text: fmtUsd(econ.breakeven_implied_usd) }))
       ),
       el('p', { class: 'why' },
         el('span', { class: 'verdict ' + verdictClass, text: econ.verdict }),
-        ' ' + (econ.verdict === 'FARM'
-          ? 'This plan pays after every cost: the $1,000 slice beats the gas and the 4% T-bill yield the capital gives up.'
-          : econ.verdict === 'THIN'
-            ? 'This plan beats its gas fees but not the 4% T-bill yield: farming it pays less than holding T-bills.'
-            : 'This plan loses to its gas fees alone at $1,000' + (econ.pays_from_usd === null ? ', and no amount of capital changes that: the slice rate is below the T-bill rate.' : '.') )
+        ' ' + (econ.verdict === 'ROBUST'
+          ? 'This plan pays even if the launch is worth the band\u2019s low end: the verdict survives the model\u2019s own uncertainty.'
+          : econ.verdict === 'FARM'
+            ? 'This plan pays after every cost at the implied value — but not at the band\u2019s low end, so it rests on the point estimate.'
+            : econ.verdict === 'THIN'
+              ? 'This plan beats its gas fees but not the 4% T-bill yield: farming it pays less than holding T-bills.'
+              : 'This plan loses to its gas fees alone at $1,000' + (econ.pays_from_usd === null ? ', and no amount of capital changes that: the slice rate is below the T-bill rate.' : '.') )
       ),
       el('p', { class: 'sub', text: 'The slice is what $1,000 deposited would get if 10% of the launch goes to depositors pro rata. Hands-on time: ' + econ.hours + ' hours in total.' })
     ));
