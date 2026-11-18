@@ -1,4 +1,4 @@
-// The token radar's model (radar-4): one snapshot of the protocol universe in, one ranked board out.
+// The token radar's model (radar-5): one snapshot of the protocol universe in, one ranked board out.
 //
 // The board covers every slug in the snapshot's watchlist (the floor, never a ceiling) and every other
 // pre-token protocol the watchlist's own exclusion rule would keep: no wrapped, staked, bridged or
@@ -8,23 +8,38 @@
 // evidence for the model: the size curve is fitted to them, and the farm economics are netted against
 // the value the curve implies.
 //
-// Implied value follows only from the snapshot's own figures. A dollar of TVL is worth a different
-// multiple at $5M than at $5B, so the model fits that curve on the snapshot's own trading protocols
-// instead of applying one flat multiple:
+// Implied value is an EXPECTED value: what the launch would be worth, times the odds it happens.
+// A protocol that will never launch is worth nothing to a farmer, however large its TVL; a protocol
+// that launches for certain is worth its full fitted value. Both halves follow only from the
+// snapshot's own figures, and both are tested out of sample:
 //
-//   log10(mcap) = a + b x log10(tvl_usd)          (ordinary least squares over the comparables)
-//   offset(cat) = shrunk median residual of the category's comparables (k = 4, n >= 3 or 0)
-//   base       = 10 ^ (a + b x log10(tvl_usd) + offset(category))
-//   growth     = clamp(change_7d, -60, 120) per cent
-//   growthMult = 1 + (growth / 100) x GROWTH_WEIGHT
-//   maturity   = 0.6 + min(age_days, 1095) / 1095 x 0.4   (age_days unknown: 365)
-//   implied    = max(1, round(base x growthMult x maturity))
+//   VALUE IF IT LAUNCHES (the size curve, fitted on the snapshot's trading protocols):
+//     log10(mcap) = a + b x log10(tvl_usd)          (ordinary least squares over the comparables)
+//     offset(cat) = shrunk median residual of the category's comparables (k = 8, n >= 3),
+//                   falling back to the category FAMILY's offset when the category has no evidence
+//     value      = 10 ^ (a + b x log10(tvl_usd) + offset(category))
+//     growthMult = 1 + (clamp(change_7d, -60, 120) / 100) x 0.5
+//     value      = value x growthMult
+//   LAUNCH ODDS (a logistic regression on the snapshot's own token statuses):
+//     odds = sigmoid(w0 + w1 x z(log10 TVL) + w2 x z(chains) + w3 x z(category token rate))
+//     fitted on the 442 rankable protocols; the target is whether the protocol records a token.
+//     Age is DELIBERATELY not a feature: age measures time already had to launch, not likelihood
+//     of launching — a young protocol has not had its window yet, and an old pre-token protocol
+//     has passed its own. (Tested: adding age lifts the classifier's accuracy on "has a token
+//     now" but crushes young protocols' odds to single digits — the wrong answer to the launch
+//     question. The maturity multiplier radar-4 carried had the same flaw: it HURT the value
+//     model's out-of-sample miss, so radar-5 drops it.)
+//   IMPLIED = max(1, round(value x odds))
 //
-// The curve is TESTED, not assumed: leave-one-out, each comparable is priced by a curve fitted without
-// it, and the median miss is compared with the flat multiple's (see backtest()). The prediction band
-// (P25-P75 of the out-of-sample residuals) is carried on every row, so the board states its own
-// uncertainty. No protocol name is ever special-cased: the same function scores every row, and the
-// curve, the offsets and the band are computed from the snapshot at runtime, never hardcoded.
+// The comparables are the live-token protocols that pass the watchlist's exclusion rule AND trade at
+// no more than 5x their TVL. A token above 5x TVL is priced on speculation about future volume, not
+// on the protocol's record — five such tokens (ratios to 400x) bent radar-4's curve and are set
+// aside, named, in the model's own audit. The curve is TESTED, not assumed: leave-one-out, 5-fold
+// and a time split, each comparable priced by a curve fitted without it (see backtest()). The
+// prediction band (P25-P75 of the out-of-sample residuals) is carried on every row, so the board
+// states its own uncertainty. No protocol name is ever special-cased: the same functions score every
+// row, and the curve, the offsets, the families and the odds are computed from the snapshot at
+// runtime, never hardcoded.
 //
 // Farm economics: a $1,000 plan's slice is what $1,000 deposited would get if 10% of the launch goes
 // to depositors pro rata (slice = 1000/TVL x 10% x implied). Net = slice - gas fees - the 4% T-bill
@@ -60,15 +75,17 @@ export interface Snapshot {
 export interface ModelConstants {
   /** The shrinkage strength for a category's offset: each category's median residual is pulled toward 0 by k pseudo-observations. */
   shrinkage_k: number;
-  /** The minimum live comparables before a category's own offset counts at all: below this, the offset is 0. */
+  /** The minimum live comparables before a category's own offset counts at all: below this, the offset falls back to the family. */
   min_comparables: number;
   growth_weight: number;
   growth_floor: number;
   growth_cap: number;
-  maturity_floor: number;
-  maturity_range: number;
-  maturity_days: number;
-  unknown_age_days: number;
+  /** A comparable whose market cap is more than this multiple of its TVL is set aside: its token is priced on speculation, not on the protocol's record. */
+  speculative_cap: number;
+  /** The shrinkage strength for a category's token rate in the odds model (pseudo-observations toward the base rate). */
+  odds_cat_k: number;
+  /** The L2 penalty on the odds model's logistic regression (the intercept is never penalised). */
+  odds_lambda: number;
   /** The share of a launch that goes to depositors pro rata, for the $1,000 slice. */
   airdrop_share: number;
   /** The risk-free yield the farmed capital gives up, per year, for the net-of-all-costs verdict. */
@@ -81,15 +98,14 @@ export interface ModelConstants {
 }
 
 export const MODEL: ModelConstants = {
-  shrinkage_k: 4,
+  shrinkage_k: 8,
   min_comparables: 3,
   growth_weight: 0.5,
   growth_floor: -60,
   growth_cap: 120,
-  maturity_floor: 0.6,
-  maturity_range: 0.4,
-  maturity_days: 1095,
-  unknown_age_days: 365,
+  speculative_cap: 5,
+  odds_cat_k: 8,
+  odds_lambda: 1,
   airdrop_share: 0.1,
   tbill_rate: 0.04,
   plan_capital: 1000,
@@ -98,7 +114,7 @@ export const MODEL: ModelConstants = {
 };
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-4';
+export const MODEL_VERSION = 'radar-5';
 
 /** How many live-token protocols the Live token view carries, by market cap. */
 export const LIVE_ROWS = 24;
@@ -153,16 +169,25 @@ export interface BoardRow {
   symbol: string | null;
   token_status: 'pre-token';
   age_days: number | null;
+  /** What the launch would be worth if it happened, before the odds discount. */
+  value_if_launches_usd: number;
+  /** The launch odds: the fitted probability this protocol records a token (0-1). */
+  launch_odds: number;
+  /** The expected value: value-if-launches x launch odds. The board ranks on this. */
   implied_value_usd: number;
   /** The prediction band: implied value times the band's low/high multipliers (P25-P75 of the out-of-sample residuals). */
   band_low_usd: number;
   band_high_usd: number;
+  /** The ranks this row would hold at the band's high and low ends: the rank's own uncertainty. */
+  rank_best: number;
+  rank_worst: number;
   model: {
     /** The category offset this row was scored with (log10 units, from the snapshot's live-token evidence). */
     category_offset: number;
+    /** The family the offset fell back to, when the category itself had no evidence (null when the category's own offset counted). */
+    offset_family: string | null;
     growth_pct: number;
     growth_multiplier: number;
-    maturity_multiplier: number;
     age_days: number | null;
   };
   economics: FarmEconomics;
@@ -181,13 +206,17 @@ export interface RadarRow {
   mcap_usd: number | null;
   listed_at: string | null;
   age_days: number | null;
+  value_if_launches_usd: number;
+  launch_odds: number;
   implied_value_usd: number;
   band_low_usd: number;
   band_high_usd: number;
+  rank_best: number;
+  rank_worst: number;
   /** The category offset this row was scored with, so the page recomputes the same number. */
   category_offset: number;
+  offset_family: string | null;
   growth_multiplier: number;
-  maturity_multiplier: number;
   economics: FarmEconomics;
 }
 
@@ -215,6 +244,28 @@ export interface CategoryOffset {
   fallback?: boolean;
 }
 
+/** One family's offset: categories that share a value-capture mechanism pool their residuals. */
+export interface FamilyOffset {
+  family: string;
+  /** Live-token comparables across the family's categories. */
+  comparables: number;
+  /** The raw median log10 residual of those comparables against the curve. */
+  raw_median: number;
+  /** The shrunk offset the model applies to a category of this family that has no evidence of its own. */
+  offset: number;
+}
+
+/** A comparable set aside as speculative: its token trades far above its TVL. */
+export interface SpeculativeExcluded {
+  slug: string;
+  name: string;
+  category: string | null;
+  tvl_usd: number;
+  mcap_usd: number;
+  /** Market cap over TVL: above the speculative cap, so the token is priced on speculation. */
+  ratio: number;
+}
+
 /** The fitted size curve and its backtest, for the dashboard. */
 export interface CurveFit {
   /** log10(mcap) = intercept + slope x log10(TVL). */
@@ -226,6 +277,10 @@ export interface CurveFit {
   comparables: number;
   /** One entry per category with at least one live comparable, sorted by category name. */
   categories: CategoryOffset[];
+  /** One entry per family with at least one live comparable, sorted by family name. */
+  families: FamilyOffset[];
+  /** The comparables set aside as speculative, largest ratio first: the audit trail for the filter. */
+  speculative_excluded: SpeculativeExcluded[];
 }
 
 /** The leave-one-out backtest: the curve tested against the flat multiple, out of sample. */
@@ -234,6 +289,10 @@ export interface Backtest {
   curve_median_miss: number;
   /** Median miss of one flat mcap/TVL multiple, same folds. */
   flat_median_miss: number;
+  /** Median miss of the curve, 5-fold (deterministic folds by slug). */
+  curve_five_fold_miss: number;
+  /** Same, for the flat multiple. */
+  flat_five_fold_miss: number;
   /** Share of comparables the curve prices within 3x of their real market cap, out of sample. */
   curve_within_3x: number;
   /** Same, for the flat multiple. */
@@ -243,6 +302,10 @@ export interface Backtest {
   /** The prediction band's multipliers (P25-P75 of the out-of-sample residuals, in linear units). */
   band_low_mult: number;
   band_high_mult: number;
+  /** A category's own band multipliers (P25-P75 of that category's out-of-sample residuals), for categories with at least 5 residuals; a row uses its category's band, else its family's, else the board's. */
+  band_by_category: { category: string; low_mult: number; high_mult: number }[];
+  /** A family's own band multipliers, same rule, for families with at least 5 residuals. */
+  band_by_family: { family: string; low_mult: number; high_mult: number }[];
   /** Time-split check: curve fitted on pre-2024 listings, median miss on newer ones. */
   time_split_curve_miss: number | null;
   /** Same, for the flat multiple. */
@@ -251,6 +314,32 @@ export interface Backtest {
   time_split_fit_n: number;
   /** How many comparables the time split tested on. */
   time_split_n: number;
+}
+
+/** The launch-odds model: a logistic regression on the snapshot's own token statuses. */
+export interface OddsFit {
+  /** Coefficients: [intercept, log10 TVL, chains, category token rate] on standardised features. */
+  coefficients: number[];
+  /** The standardisation means for [log10 TVL, chains, category token rate]. */
+  means: number[];
+  /** The standardisation standard deviations for the same three features. */
+  sds: number[];
+  /** The base rate: the share of rankable protocols that record a token. */
+  base_rate: number;
+  /** How many rankable protocols the odds model is fitted on. */
+  protocols: number;
+  /** One entry per category with at least one rankable protocol: its shrunk token rate. */
+  category_rates: { category: string; protocols: number; with_token: number; rate: number }[];
+}
+
+/** The odds model's validation: leave-one-out accuracy against the base rate. */
+export interface OddsBacktest {
+  /** Share of protocols whose token status the model calls right, leave-one-out. */
+  loo_accuracy: number;
+  /** The base rate: the share the majority class alone would call right. */
+  base_rate: number;
+  /** How many protocols the validation ran on. */
+  protocols: number;
 }
 
 /** A pre-token protocol the board sets aside, with the rule that set it aside. */
@@ -270,6 +359,17 @@ export interface ScatterPoint {
   mcap_usd: number;
 }
 
+/** The snapshot's 758 protocols accounted for, every group with one reason. */
+export interface Accounting {
+  ranked: number;
+  live_token: number;
+  bridges: number;
+  liquid_staking: number;
+  exchanges: number;
+  versioned: number;
+  wrapped: number;
+}
+
 /** Everything the dashboard needs: the board, the live set, and the model it runs. */
 export interface RadarData {
   as_of: string;
@@ -279,6 +379,9 @@ export interface RadarData {
   model_version: string;
   curve: CurveFit;
   backtest: Backtest;
+  odds: OddsFit;
+  odds_backtest: OddsBacktest;
+  accounting: Accounting;
   watchlist_size: number;
   board_size: number;
   early_size: number;
@@ -327,16 +430,84 @@ function medianOf(sorted: number[]): number {
 }
 
 /**
+ * The category families: categories grouped by the mechanism through which a token would capture
+ * value, so a category with no live-token evidence of its own borrows its family's. Vaults manage
+ * other people's capital for a fee; Credit lends against collateral; Trading takes a cut of volume;
+ * Real Assets tokenise off-chain yield; Staking secures a chain; Bridges move assets across chains.
+ * A category not listed here has no family and falls back to offset 0. This is a grouping of
+ * categories by mechanism, never of protocol names — the same map would apply to a future snapshot.
+ */
+export const FAMILIES: Record<string, string> = {
+  'Risk Curators': 'Vaults',
+  'Onchain Capital Allocator': 'Vaults',
+  'Yield Aggregator': 'Vaults',
+  Yield: 'Vaults',
+  'Liquidity Manager': 'Vaults',
+  Lending: 'Credit',
+  CDP: 'Credit',
+  'Collateral Management': 'Credit',
+  'Leveraged Farming': 'Credit',
+  Dexs: 'Trading',
+  Derivatives: 'Trading',
+  Perpetuals: 'Trading',
+  Options: 'Trading',
+  'Basis Trading': 'Trading',
+  RWA: 'Real Assets',
+  Restaking: 'Staking',
+  'Staking Pool': 'Staking',
+  'Liquid Staking': 'Staking',
+  Bridge: 'Bridges',
+  'Canonical Bridge': 'Bridges',
+  'Cross Chain Bridge': 'Bridges',
+};
+
+/** The family a category belongs to, or null when it has none. */
+export function familyOf(category: string | null): string | null {
+  if (category === null) return null;
+  return FAMILIES[category] ?? null;
+}
+
+/**
  * The comparables the curve is fitted on: live-token protocols that pass the watchlist's exclusion
- * rule (no bridge, liquid-staking, exchange or wrapped product, no versioned pool). A wrapped token's
- * market cap is the wrapped asset's value, not a launch's — it would bend the curve toward the assets
- * the board exists to exclude. A comparable needs a positive market cap and a positive TVL, or its
+ * rule (no bridge, liquid-staking, exchange or wrapped product, no versioned pool) AND trade at no
+ * more than the speculative cap times their TVL. A wrapped token's market cap is the wrapped asset's
+ * value, not a launch's — it would bend the curve toward the assets the board exists to exclude.
+ * A token above the cap is priced on speculation about future volume, not on the protocol's record:
+ * five such tokens (ratios to 400x) bent radar-4's curve and are set aside, named, by
+ * speculativeExcluded(). A comparable needs a positive market cap and a positive TVL, or its
  * logarithm is undefined.
  */
-export function comparables(snapshot: Snapshot): SnapshotProtocol[] {
+export function comparables(snapshot: Snapshot, model: ModelConstants = MODEL): SnapshotProtocol[] {
   return snapshot.protocols.filter(
-    (p) => p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0 && passesWatchlistExclusions(p),
+    (p) =>
+      p.mcap_usd !== null &&
+      p.mcap_usd > 0 &&
+      p.tvl_usd > 0 &&
+      p.mcap_usd / p.tvl_usd <= model.speculative_cap &&
+      passesWatchlistExclusions(p),
   );
+}
+
+/** The live-token protocols the speculative cap sets aside, largest ratio first. */
+export function speculativeExcluded(snapshot: Snapshot, model: ModelConstants = MODEL): SpeculativeExcluded[] {
+  return snapshot.protocols
+    .filter(
+      (p) =>
+        p.mcap_usd !== null &&
+        p.mcap_usd > 0 &&
+        p.tvl_usd > 0 &&
+        p.mcap_usd / p.tvl_usd > model.speculative_cap &&
+        passesWatchlistExclusions(p),
+    )
+    .map((p) => ({
+      slug: p.slug,
+      name: p.name,
+      category: p.category,
+      tvl_usd: p.tvl_usd,
+      mcap_usd: p.mcap_usd!,
+      ratio: round4(p.mcap_usd! / p.tvl_usd),
+    }))
+    .sort((a, b) => b.ratio - a.ratio);
 }
 
 /** Ordinary least squares for y = a + b x. */
@@ -373,21 +544,47 @@ function shrunkOffset(residuals: number[], model: ModelConstants): { raw: number
  * The size curve, fitted from the snapshot's own live-token protocols: log10(mcap) on log10(TVL) by
  * ordinary least squares, plus a shrunk per-category offset from the residuals. The offsets are why
  * the curve beats a flat multiple: a DEX token captures more value per dollar of TVL than a lending
- * token does, and the snapshot's own trading protocols say by how much. Nothing here is hardcoded:
- * run this on a future snapshot and the curve, the offsets and the backtest move with the market.
+ * token does, and the snapshot's own trading protocols say by how much. A category with too few
+ * comparables for its own offset falls back to its FAMILY's offset — Risk Curators, the board's
+ * largest category, has one live comparable and would otherwise get no adjustment at all, while its
+ * Vaults family (Yield Aggregator, Onchain Capital Allocator, Yield) has twenty. Nothing here is
+ * hardcoded: run this on a future snapshot and the curve, the offsets and the backtest move with
+ * the market.
  */
 export function fitCurve(snapshot: Snapshot, model: ModelConstants = MODEL): CurveFit {
-  const comps = comparables(snapshot);
+  const comps = comparables(snapshot, model);
+  const fit = fitCurveOn(comps, model);
+  return {
+    ...fit,
+    intercept: round4(fit.intercept),
+    slope: round4(fit.slope),
+    speculative_excluded: speculativeExcluded(snapshot, model),
+  };
+}
+
+/**
+ * The size curve fitted on one list of comparables (the backtest refits it per fold, so the
+ * speculative audit is attached by fitCurve, not here). The intercept and slope are kept at full
+ * precision for scoring; fitCurve rounds them for display.
+ */
+export function fitCurveOn(comps: SnapshotProtocol[], model: ModelConstants = MODEL): Omit<CurveFit, 'speculative_excluded'> {
   const xs = comps.map((p) => Math.log10(p.tvl_usd));
   const ys = comps.map((p) => Math.log10(p.mcap_usd!));
   const { intercept, slope, rSquared } = ols(xs, ys);
   const residualsByCategory = new Map<string, number[]>();
+  const residualsByFamily = new Map<string, number[]>();
   for (let i = 0; i < comps.length; i++) {
     const cat = comps[i]!.category ?? 'Other';
-    const list = residualsByCategory.get(cat);
     const r = ys[i]! - (intercept + slope * xs[i]!);
+    const list = residualsByCategory.get(cat);
     if (list === undefined) residualsByCategory.set(cat, [r]);
     else list.push(r);
+    const fam = familyOf(comps[i]!.category);
+    if (fam !== null) {
+      const flist = residualsByFamily.get(fam);
+      if (flist === undefined) residualsByFamily.set(fam, [r]);
+      else flist.push(r);
+    }
   }
   const categories: CategoryOffset[] = [...residualsByCategory.entries()]
     .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
@@ -395,14 +592,29 @@ export function fitCurve(snapshot: Snapshot, model: ModelConstants = MODEL): Cur
       const { raw, offset, fallback } = shrunkOffset(residuals, model);
       return { category, comparables: residuals.length, raw_median: raw, offset, fallback: fallback || undefined };
     });
-  return { intercept: round4(intercept), slope: round4(slope), r_squared: round4(rSquared), comparables: comps.length, categories };
+  const families: FamilyOffset[] = [...residualsByFamily.entries()]
+    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+    .map(([family, residuals]) => {
+      const { raw, offset } = shrunkOffset(residuals, model);
+      return { family, comparables: residuals.length, raw_median: raw ?? 0, offset };
+    });
+  return { intercept, slope, r_squared: round4(rSquared), comparables: comps.length, categories, families };
 }
 
-/** The offset a category gets: its shrunk offset, or 0 when it has no evidence. */
-export function offsetFor(category: string | null, fit: CurveFit): number {
-  if (category === null) return 0;
+/**
+ * The offset a category gets, and the family it fell back to: the category's own shrunk offset when
+ * it has enough comparables, else its family's offset, else 0. The family is returned so the board
+ * can say which evidence priced the row.
+ */
+export function offsetFor(category: string | null, fit: Pick<CurveFit, 'categories' | 'families'>): { offset: number; family: string | null } {
+  if (category === null) return { offset: 0, family: null };
   const entry = fit.categories.find((c) => c.category === category);
-  return entry === undefined ? 0 : entry.offset;
+  if (entry !== undefined && !entry.fallback) return { offset: entry.offset, family: null };
+  const fam = familyOf(category);
+  if (fam === null) return { offset: 0, family: null };
+  const fentry = fit.families.find((f) => f.family === fam);
+  if (fentry === undefined || fentry.offset === 0) return { offset: 0, family: null };
+  return { offset: fentry.offset, family: fam };
 }
 
 /** The miss of a prediction against the real value: the larger over the smaller, so 1 is exact. */
@@ -419,62 +631,112 @@ function percentileOf(sorted: number[], q: number): number {
   return sorted[lo]! + (sorted[hi]! - sorted[lo]!) * (at - lo);
 }
 
+/** One comparable's value under a fitted curve (curve + offset + growth), in dollars. */
+function valueUnder(p: SnapshotProtocol, fit: Pick<CurveFit, 'categories' | 'families' | 'intercept' | 'slope'>, model: ModelConstants): number {
+  const { offset } = offsetFor(p.category, fit);
+  const g = Math.min(model.growth_cap, Math.max(model.growth_floor, finite(p.change_7d, 0)));
+  const growthMult = 1 + (g / 100) * model.growth_weight;
+  return 10 ** (fit.intercept + fit.slope * Math.log10(Math.max(p.tvl_usd, 1)) + offset) * growthMult;
+}
+
 /**
- * The backtest: leave-one-out, each comparable is priced by a curve fitted without it (its category
- * offset refit from the remaining comparables), and the median miss is compared with one flat
- * mcap/TVL multiple's on the same folds. The prediction band comes from the out-of-sample residuals'
- * percentiles. A time split (fit on pre-2024 listings, test on newer ones) checks the curve holds
- * forward in time, not just across the sample.
+ * The backtest: leave-one-out, 5-fold and a time split, each comparable priced by a curve fitted
+ * without it (its category offset — and family fallback — refit from the remaining comparables), and
+ * the median miss compared with one flat mcap/TVL multiple's on the same folds. The prediction band
+ * comes from the out-of-sample residuals' percentiles. The time split (fit on pre-2024 listings,
+ * test on newer ones) checks the curve holds forward in time, not just across the sample.
  */
 export function backtest(snapshot: Snapshot, model: ModelConstants = MODEL): Backtest {
-  const comps = comparables(snapshot);
+  const comps = comparables(snapshot, model);
   const flatMedian = medianOf(comps.map((p) => p.mcap_usd! / p.tvl_usd).sort((a, b) => a - b));
   const curveMisses: number[] = [];
   const flatMisses: number[] = [];
   const oosResiduals: number[] = [];
+  const oosByCategory = new Map<string, number[]>();
+  const oosByFamily = new Map<string, number[]>();
   for (let i = 0; i < comps.length; i++) {
     const rest = comps.filter((_, j) => j !== i);
-    const xs = rest.map((p) => Math.log10(p.tvl_usd));
-    const ys = rest.map((p) => Math.log10(p.mcap_usd!));
-    const { intercept, slope } = ols(xs, ys);
+    const fit = fitCurveOn(rest, model);
     const held = comps[i]!;
-    const cat = held.category ?? 'Other';
-    const catResiduals = rest
-      .filter((p) => (p.category ?? 'Other') === cat)
-      .map((p) => Math.log10(p.mcap_usd!) - (intercept + slope * Math.log10(p.tvl_usd)));
-    const { offset } = shrunkOffset(catResiduals, model);
-    const predLog = intercept + slope * Math.log10(held.tvl_usd) + offset;
-    const pred = 10 ** predLog;
+    const pred = valueUnder(held, fit, model);
     curveMisses.push(missOf(pred, held.mcap_usd!));
     flatMisses.push(missOf(held.tvl_usd * flatMedian, held.mcap_usd!));
-    oosResiduals.push(Math.log10(held.mcap_usd!) - predLog);
+    const res = Math.log10(held.mcap_usd!) - Math.log10(pred);
+    oosResiduals.push(res);
+    const cat = held.category ?? 'Other';
+    const clist = oosByCategory.get(cat);
+    if (clist === undefined) oosByCategory.set(cat, [res]);
+    else clist.push(res);
+    const fam = familyOf(held.category);
+    if (fam !== null) {
+      const flist = oosByFamily.get(fam);
+      if (flist === undefined) oosByFamily.set(fam, [res]);
+      else flist.push(res);
+    }
   }
   oosResiduals.sort((a, b) => a - b);
+  // A category's (or family's) own band, where it has at least 5 out-of-sample residuals: the
+  // spread of its own evidence, not the board's. Fewer than 5 and the percentiles are noise, so
+  // the row falls back to the family, then to the board's band. The residuals are centred on their
+  // own median first: the offset already corrects the category's level, so the band shows the
+  // SPREAD around the corrected estimate — and always contains the implied value.
+  const bandOf = (residuals: number[]): { low_mult: number; high_mult: number } => {
+    const sorted = [...residuals].sort((a, b) => a - b);
+    const med = medianOf(sorted);
+    const centred = sorted.map((r) => r - med);
+    return {
+      low_mult: round4(10 ** percentileOf(centred, model.band_low)),
+      high_mult: round4(10 ** percentileOf(centred, model.band_high)),
+    };
+  };
+  const band_by_category = [...oosByCategory.entries()]
+    .filter(([, rs]) => rs.length >= 5)
+    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+    .map(([category, rs]) => ({ category, ...bandOf(rs) }));
+  const band_by_family = [...oosByFamily.entries()]
+    .filter(([, rs]) => rs.length >= 5)
+    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+    .map(([family, rs]) => ({ family, ...bandOf(rs) }));
   const within = (misses: number[], k: number): number =>
     Math.round((misses.filter((m) => m <= k).length / misses.length) * 1000) / 1000;
+  // 5-fold: deterministic folds by slug, so the split is the same on every run.
+  const sorted = [...comps].sort((a, b) => (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0));
+  const foldCurve: number[] = [];
+  const foldFlat: number[] = [];
+  for (let f = 0; f < 5; f++) {
+    const test = sorted.filter((_, i) => i % 5 === f);
+    const train = sorted.filter((_, i) => i % 5 !== f);
+    const fit = fitCurveOn(train, model);
+    for (const p of test) {
+      foldCurve.push(missOf(valueUnder(p, fit, model), p.mcap_usd!));
+      foldFlat.push(missOf(p.tvl_usd * flatMedian, p.mcap_usd!));
+    }
+  }
   // Time split: fit on listings before 2024, test on the newer ones.
   const old = comps.filter((p) => p.listed_at !== null && p.listed_at < '2024-01-01');
   const newer = comps.filter((p) => p.listed_at !== null && p.listed_at >= '2024-01-01');
   let timeSplitCurve: number | null = null;
   let timeSplitFlat: number | null = null;
   if (old.length >= 5 && newer.length >= 5) {
-    const { intercept, slope } = ols(
-      old.map((p) => Math.log10(p.tvl_usd)),
-      old.map((p) => Math.log10(p.mcap_usd!)),
-    );
-    const cm = newer.map((p) => missOf(10 ** (intercept + slope * Math.log10(p.tvl_usd)), p.mcap_usd!));
+    const fit = fitCurveOn(old, model);
+    const cm = newer.map((p) => missOf(valueUnder(p, fit, model), p.mcap_usd!));
     const fm = newer.map((p) => missOf(p.tvl_usd * flatMedian, p.mcap_usd!));
     timeSplitCurve = round4(medianOf([...cm].sort((a, b) => a - b)));
     timeSplitFlat = round4(medianOf([...fm].sort((a, b) => a - b)));
   }
+  const overallBand = bandOf(oosResiduals);
   return {
     curve_median_miss: round4(medianOf([...curveMisses].sort((a, b) => a - b))),
     flat_median_miss: round4(medianOf([...flatMisses].sort((a, b) => a - b))),
+    curve_five_fold_miss: round4(medianOf([...foldCurve].sort((a, b) => a - b))),
+    flat_five_fold_miss: round4(medianOf([...foldFlat].sort((a, b) => a - b))),
     curve_within_3x: within(curveMisses, 3),
     flat_within_3x: within(flatMisses, 3),
     curve_within_10x: within(curveMisses, 10),
-    band_low_mult: round4(10 ** percentileOf(oosResiduals, model.band_low)),
-    band_high_mult: round4(10 ** percentileOf(oosResiduals, model.band_high)),
+    band_low_mult: overallBand.low_mult,
+    band_high_mult: overallBand.high_mult,
+    band_by_category,
+    band_by_family,
     time_split_curve_miss: timeSplitCurve,
     time_split_flat_miss: timeSplitFlat,
     time_split_fit_n: old.length,
@@ -482,23 +744,174 @@ export function backtest(snapshot: Snapshot, model: ModelConstants = MODEL): Bac
   };
 }
 
-/** The three multipliers and the implied value one protocol gets under `model` and the fitted curve. */
+/** The protocols the odds model is fitted on: every protocol the watchlist's exclusion rule keeps, live-token and pre-token alike. */
+export function rankableProtocols(snapshot: Snapshot): SnapshotProtocol[] {
+  return snapshot.protocols.filter((p) => p.tvl_usd > 0 && passesWatchlistExclusions(p));
+}
+
+/** The logistic function, clamped so it never overflows. */
+const sigmoid = (z: number): number => 1 / (1 + Math.exp(-Math.max(-30, Math.min(30, z))));
+
+/** The odds model's three features, unstandardised: log10 TVL, chain count, and the category's token rate (filled in by the caller). */
+type OddsFeatures = { logTvl: number; nChains: number; catRate: number };
+
+/** A protocol's odds features, with the category rate from `catRate`. */
+function oddsFeatures(p: SnapshotProtocol, catRate: (p: SnapshotProtocol) => number): OddsFeatures {
+  return { logTvl: Math.log10(Math.max(p.tvl_usd, 1)), nChains: p.chains.length, catRate: catRate(p) };
+}
+
+/** A shrunk category token rate: (with_token + k x base) / (n + k), so a small category borrows the base rate. */
+function categoryTokenRates(
+  protocols: SnapshotProtocol[],
+  model: ModelConstants,
+): { base: number; rates: Map<string, { n: number; has: number; rate: number }> } {
+  const base = protocols.filter((p) => !isPreToken(p)).length / protocols.length;
+  const byCat = new Map<string, { n: number; has: number }>();
+  for (const p of protocols) {
+    const c = p.category ?? 'Other';
+    const v = byCat.get(c) ?? { n: 0, has: 0 };
+    v.n++;
+    if (!isPreToken(p)) v.has++;
+    byCat.set(c, v);
+  }
+  const rates = new Map<string, { n: number; has: number; rate: number }>();
+  for (const [c, v] of byCat) {
+    rates.set(c, { n: v.n, has: v.has, rate: (v.has + model.odds_cat_k * base) / (v.n + model.odds_cat_k) });
+  }
+  return { base, rates };
+}
+
+/** A logistic regression by batch gradient descent: fixed iterations, fixed step, no randomness. */
+function fitLogistic(rows: number[][], ys: number[], lambda: number, iters: number): number[] {
+  const d = rows[0]!.length;
+  const w = new Array<number>(d).fill(0);
+  const lr = 0.5;
+  for (let it = 0; it < iters; it++) {
+    const grad = new Array<number>(d).fill(0);
+    for (let i = 0; i < rows.length; i++) {
+      let z = 0;
+      for (let j = 0; j < d; j++) z += rows[i]![j]! * w[j]!;
+      const err = sigmoid(z) - ys[i]!;
+      for (let j = 0; j < d; j++) grad[j]! += err * rows[i]![j]!;
+    }
+    for (let j = 1; j < d; j++) grad[j]! += lambda * w[j]!;
+    for (let j = 0; j < d; j++) w[j]! -= (lr / rows.length) * grad[j]!;
+  }
+  return w;
+}
+
+/**
+ * The launch-odds model, fitted from the snapshot's own token statuses: a logistic regression on
+ * the rankable protocols, target "records a token". Features: log10 TVL, chain count, and the
+ * category's shrunk token rate — each standardised on the training set. Age is deliberately NOT a
+ * feature (see the header comment): it measures time already had to launch, not likelihood of
+ * launching. The fit is deterministic: fixed iterations, no randomness, no wall clock.
+ */
+export function fitOdds(snapshot: Snapshot, model: ModelConstants = MODEL): OddsFit {
+  const protocols = rankableProtocols(snapshot);
+  const { base, rates } = categoryTokenRates(protocols, model);
+  const catRate = (p: SnapshotProtocol): number => rates.get(p.category ?? 'Other')?.rate ?? base;
+  const feats = protocols.map((p) => oddsFeatures(p, catRate));
+  const keys: (keyof OddsFeatures)[] = ['logTvl', 'nChains', 'catRate'];
+  const means = keys.map((k) => feats.reduce((s, f) => s + f[k], 0) / feats.length);
+  const sds = keys.map((k, j) => {
+    const v = Math.sqrt(feats.reduce((s, f) => s + (f[k] - means[j]!) ** 2, 0) / feats.length);
+    return v === 0 ? 1 : v;
+  });
+  const design = (f: OddsFeatures): number[] => [1, ...keys.map((k, j) => (f[k] - means[j]!) / sds[j]!)];
+  const coefficients = fitLogistic(
+    feats.map(design),
+    protocols.map((p) => (isPreToken(p) ? 0 : 1)),
+    model.odds_lambda,
+    500,
+  );
+  const category_rates = [...rates.entries()]
+    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+    .map(([category, v]) => ({ category, protocols: v.n, with_token: v.has, rate: round4(v.rate) }));
+  return {
+    coefficients: coefficients.map(round4),
+    means: means.map(round4),
+    sds: sds.map(round4),
+    base_rate: round4(base),
+    protocols: protocols.length,
+    category_rates,
+  };
+}
+
+/** The launch odds one protocol gets under a fitted odds model. */
+export function oddsFor(p: SnapshotProtocol, fit: OddsFit): number {
+  const rate = fit.category_rates.find((c) => c.category === (p.category ?? 'Other'))?.rate ?? fit.base_rate;
+  const feats = [Math.log10(Math.max(p.tvl_usd, 1)), p.chains.length, rate];
+  let z = fit.coefficients[0]!;
+  for (let j = 0; j < 3; j++) z += fit.coefficients[j + 1]! * ((feats[j]! - fit.means[j]!) / fit.sds[j]!);
+  return sigmoid(z);
+}
+
+/**
+ * The odds model's validation: leave-one-out, each protocol's token status called by a model fitted
+ * without it (standardisation and category rates refit per fold), against the base rate the
+ * majority class alone would call right. Fewer gradient steps per fold than the full fit — the
+ * coefficients converge long before 150 steps, and the validation runs 442 fits.
+ */
+export function oddsBacktest(snapshot: Snapshot, model: ModelConstants = MODEL): OddsBacktest {
+  const protocols = rankableProtocols(snapshot);
+  const base = protocols.filter((p) => !isPreToken(p)).length / protocols.length;
+  let correct = 0;
+  for (let i = 0; i < protocols.length; i++) {
+    const rest = protocols.filter((_, j) => j !== i);
+    const { base: b, rates } = categoryTokenRates(rest, model);
+    const catRate = (p: SnapshotProtocol): number => rates.get(p.category ?? 'Other')?.rate ?? b;
+    const feats = rest.map((p) => oddsFeatures(p, catRate));
+    const keys: (keyof OddsFeatures)[] = ['logTvl', 'nChains', 'catRate'];
+    const means = keys.map((k) => feats.reduce((s, f) => s + f[k], 0) / feats.length);
+    const sds = keys.map((k, j) => {
+      const v = Math.sqrt(feats.reduce((s, f) => s + (f[k] - means[j]!) ** 2, 0) / feats.length);
+      return v === 0 ? 1 : v;
+    });
+    const design = (f: OddsFeatures): number[] => [1, ...keys.map((k, j) => (f[k] - means[j]!) / sds[j]!)];
+    const w = fitLogistic(
+      feats.map(design),
+      rest.map((p) => (isPreToken(p) ? 0 : 1)),
+      model.odds_lambda,
+      150,
+    );
+    const held = protocols[i]!;
+    const f = oddsFeatures(held, catRate);
+    const row = design(f);
+    let z = 0;
+    for (let j = 0; j < row.length; j++) z += row[j]! * w[j]!;
+    const pred = sigmoid(z) >= 0.5 ? 1 : 0;
+    if (pred === (isPreToken(held) ? 0 : 1)) correct++;
+  }
+  return { loo_accuracy: round4(correct / protocols.length), base_rate: round4(base), protocols: protocols.length };
+}
+
+/** The value, the odds and the implied value one protocol gets under `model` and the fitted curve and odds. */
 export function impliedValue(
   protocol: SnapshotProtocol,
   asOf: string,
   model: ModelConstants,
   fit: CurveFit,
-): { implied: number; offset: number; growthPct: number; growthMult: number; maturityMult: number; age: number | null } {
+  odds: OddsFit,
+): {
+  value: number;
+  odds: number;
+  implied: number;
+  offset: number;
+  family: string | null;
+  growthPct: number;
+  growthMult: number;
+  age: number | null;
+} {
   const age = ageDays(asOf, protocol.listed_at);
   const rawGrowth = finite(protocol.change_7d, 0);
   const growthPct = Math.min(model.growth_cap, Math.max(model.growth_floor, rawGrowth));
   const growthMult = 1 + (growthPct / 100) * model.growth_weight;
-  const ageForModel = age ?? model.unknown_age_days;
-  const maturityMult = model.maturity_floor + (Math.min(Math.max(ageForModel, 0), model.maturity_days) / model.maturity_days) * model.maturity_range;
-  const offset = offsetFor(protocol.category, fit);
-  const base = 10 ** (fit.intercept + fit.slope * Math.log10(Math.max(protocol.tvl_usd, 1)) + offset);
-  const implied = Math.max(1, Math.round(base * growthMult * maturityMult));
-  return { implied, offset, growthPct, growthMult, maturityMult, age };
+  const { offset, family } = offsetFor(protocol.category, fit);
+  const value = Math.max(1, Math.round(10 ** (fit.intercept + fit.slope * Math.log10(Math.max(protocol.tvl_usd, 1)) + offset) * growthMult));
+  const p = oddsFor(protocol, odds);
+  const implied = Math.max(1, Math.round(value * p));
+  return { value, odds: round4(p), implied, offset, family, growthPct, growthMult, age };
 }
 
 /** DefiLlama's version-marker rule: a name ending in a release is a pool of another protocol. */
@@ -548,7 +961,12 @@ export interface BoardSummary {
 }
 
 /** The protocols the board ranks, strongest first, with ranks 1..n. */
-export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL, fit: CurveFit = fitCurve(snapshot, model)): BoardRow[] {
+export function buildBoard(
+  snapshot: Snapshot,
+  model: ModelConstants = MODEL,
+  fit: CurveFit = fitCurve(snapshot, model),
+  odds: OddsFit = fitOdds(snapshot, model),
+): BoardRow[] {
   const index = bySlug(snapshot.protocols);
   const chosen = new Map<string, SnapshotProtocol>();
   // The watchlist is the floor: every slug, even one the snapshot no longer carries (it cannot, but the
@@ -568,11 +986,44 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL, fi
   }
 
   const test = backtest(snapshot, model);
+  // A row's band: its category's own out-of-sample spread where the category has enough evidence,
+  // else its family's, else the board's. A tight category (RWA) gets a tight band; a dispersed one
+  // (Dexs) gets a wide one — and because the band varies by row, the rank range is real.
+  const bandFor = (p: SnapshotProtocol): { low: number; high: number } => {
+    const cat = test.band_by_category.find((b) => b.category === (p.category ?? 'Other'));
+    if (cat !== undefined) return { low: cat.low_mult, high: cat.high_mult };
+    const fam = familyOf(p.category);
+    if (fam !== null) {
+      const f = test.band_by_family.find((b) => b.family === fam);
+      if (f !== undefined) return { low: f.low_mult, high: f.high_mult };
+    }
+    return { low: test.band_low_mult, high: test.band_high_mult };
+  };
   const scored = [...chosen.values()].map((p) => {
-    const { implied, offset, growthPct, growthMult, maturityMult, age } = impliedValue(p, snapshot.as_of, model, fit);
-    return { p, implied, offset, growthPct, growthMult, maturityMult, age };
+    const { value, odds: o, implied, offset, family, growthPct, growthMult, age } = impliedValue(p, snapshot.as_of, model, fit, odds);
+    const band = bandFor(p);
+    return {
+      p,
+      value,
+      odds: o,
+      implied,
+      offset,
+      family,
+      growthPct,
+      growthMult,
+      age,
+      bandLowMult: band.low,
+      bandLow: Math.max(1, Math.round(implied * band.low)),
+      bandHigh: Math.max(1, Math.round(implied * band.high)),
+    };
   });
   scored.sort((a, b) => b.implied - a.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
+  // The rank range: where each row would sit if IT were priced at its band's high end (its best
+  // rank — how many rows' implied values still beat its optimistic value) or its band's low end
+  // (its worst rank), holding every other row at its implied value. The band is the value model's
+  // own uncertainty, so the range is the rank's uncertainty, not a second opinion.
+  const implieds = scored.map((s) => s.implied).sort((a, b) => b - a);
+  const rankOf = (v: number): number => implieds.filter((x) => x > v).length + 1;
   return scored.map((s, i) => ({
     rank: i + 1,
     slug: s.p.slug,
@@ -587,17 +1038,21 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL, fi
     symbol: s.p.symbol,
     token_status: 'pre-token',
     age_days: s.age,
+    value_if_launches_usd: s.value,
+    launch_odds: s.odds,
     implied_value_usd: s.implied,
-    band_low_usd: Math.max(1, Math.round(s.implied * test.band_low_mult)),
-    band_high_usd: Math.max(1, Math.round(s.implied * test.band_high_mult)),
+    band_low_usd: s.bandLow,
+    band_high_usd: s.bandHigh,
+    rank_best: rankOf(s.bandHigh),
+    rank_worst: rankOf(s.bandLow),
     model: {
       category_offset: s.offset,
+      offset_family: s.family,
       growth_pct: s.growthPct,
       growth_multiplier: round4(s.growthMult),
-      maturity_multiplier: round4(s.maturityMult),
       age_days: s.age,
     },
-    economics: farmEconomics(s.p, s.implied, s.age, model, test.band_low_mult),
+    economics: farmEconomics(s.p, s.implied, s.age, model, s.bandLowMult),
     farm_steps: farmSteps(s.p, s.age).map(stepText),
   }));
 }
@@ -851,24 +1306,52 @@ export function radarRow(row: BoardRow): RadarRow {
     mcap_usd: row.mcap_usd,
     listed_at: row.listed_at,
     age_days: row.age_days,
+    value_if_launches_usd: row.value_if_launches_usd,
+    launch_odds: row.launch_odds,
     implied_value_usd: row.implied_value_usd,
     band_low_usd: row.band_low_usd,
     band_high_usd: row.band_high_usd,
+    rank_best: row.rank_best,
+    rank_worst: row.rank_worst,
     category_offset: row.model.category_offset,
+    offset_family: row.model.offset_family,
     growth_multiplier: row.model.growth_multiplier,
-    maturity_multiplier: row.model.maturity_multiplier,
     economics: row.economics,
   };
+}
+
+/** The snapshot's 758 protocols accounted for, every group with one reason. */
+export function accounting(snapshot: Snapshot, boardSize: number): Accounting {
+  let live_token = 0;
+  let bridges = 0;
+  let liquid_staking = 0;
+  let exchanges = 0;
+  let versioned = 0;
+  let wrapped = 0;
+  for (const p of snapshot.protocols) {
+    if (!isPreToken(p)) {
+      live_token++;
+      continue;
+    }
+    if (p.category === 'Bridge' || p.category === 'Canonical Bridge') bridges++;
+    else if (p.category === 'Liquid Staking' || p.category === 'Liquid Restaking' || p.category === 'Restaked BTC') liquid_staking++;
+    else if (p.category === 'CEX' || EXCHANGE_NAMES.some((e) => p.name.startsWith(e))) exchanges++;
+    else if (VERSIONED.test(p.name)) versioned++;
+    else if (WRAPPED_WORD.test(p.name)) wrapped++;
+  }
+  return { ranked: boardSize, live_token, bridges, liquid_staking, exchanges, versioned, wrapped };
 }
 
 /** Everything the dashboard renders, from the snapshot. */
 export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): { board: BoardRow[]; radar: RadarData } {
   const fit = fitCurve(snapshot, model);
   const test = backtest(snapshot, model);
-  const board = buildBoard(snapshot, model, fit);
+  const odds = fitOdds(snapshot, model);
+  const oddsTest = oddsBacktest(snapshot, model);
+  const board = buildBoard(snapshot, model, fit, odds);
   const live = liveRows(snapshot);
   const setAside = setAsideRows(snapshot);
-  const scatter = comparables(snapshot).map((p) => ({ tvl_usd: p.tvl_usd, mcap_usd: p.mcap_usd! }));
+  const scatter = comparables(snapshot, model).map((p) => ({ tvl_usd: p.tvl_usd, mcap_usd: p.mcap_usd! }));
   const early = board.filter((r) => !snapshot.watchlist.includes(r.slug)).length;
   const radar: RadarData = {
     as_of: snapshot.as_of,
@@ -878,6 +1361,9 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     model_version: MODEL_VERSION,
     curve: fit,
     backtest: test,
+    odds,
+    odds_backtest: oddsTest,
+    accounting: accounting(snapshot, board.length),
     watchlist_size: snapshot.watchlist.length,
     board_size: board.length,
     early_size: early,
