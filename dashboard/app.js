@@ -1,6 +1,5 @@
-// Token Radar's dashboard: it reads window.RADAR (written beside dashboard/ by main.ts) and renders
-// the ranked board — top-5 strip, filterable sortable table, detail drawer, scatter plot, backtest
-// and set-aside list. No network: every byte it shows is in data.js. No name is special-cased.
+// Token Radar's dashboard: renders window.RADAR (written by main.ts) — top-5 strip, table, detail
+// drawer, scatter, backtest, set-aside. No network; no name special-cased.
 (function () {
   'use strict';
 
@@ -31,10 +30,9 @@
     if (days >= 365) return (days / 365).toFixed(1) + 'y';
     return Math.max(0, Math.round(days)) + 'd';
   }
-  // The model in one function: the page recomputes a row from the snapshot figures and checks the
-  // number board.json carries, so the page's code and the board's data are visibly the same arithmetic.
-  // value = 10 ^ (intercept + slope x log10(TVL) + category offset) x growthMult; odds is the logistic
-  // on standardised [log10 TVL, chains, category token rate]; implied = round(value x odds).
+  // The page recomputes every row from the snapshot figures and checks it against board.json.
+  // value = 10 ^ (intercept + slope x log10(TVL) + category offset) x growthMult; odds = logistic
+  // on z[log10 TVL, chains, category rate, age-bucket rate]; implied = round(value x odds).
   function valueOf(row, model, curve) {
     var growth = Math.min(model.growth_cap, Math.max(model.growth_floor, row.change_7d == null ? 0 : row.change_7d));
     var growthMult = 1 + (growth / 100) * model.growth_weight;
@@ -42,15 +40,22 @@
     return Math.max(1, Math.round(base * growthMult));
   }
   function sigmoid(z) { return 1 / (1 + Math.exp(-Math.max(-30, Math.min(30, z)))); }
-  // The launch odds: the fitted probability this protocol records a token. Same features and
-  // standardisation as lib/model.ts oddsFor — the page must reproduce board.json exactly.
+  // Launch odds: same features and standardisation as lib/model.ts oddsFor.
   function oddsOf(row, odds) {
     var entry = findIn(odds.category_rates, 'category', row.category || 'Other');
     var rate = entry ? entry.rate : odds.base_rate;
-    var feats = [Math.log10(Math.max(row.tvl_usd, 1)), row.chains.length, rate];
+    var ageRate = odds.age_null_rate, a = row.age_days;
+    if (a != null) odds.age_bucket_rates.forEach(function (x) { if (a >= x.min_days && (x.max_days == null || a < x.max_days)) ageRate = x.rate; });
+    var feats = [Math.log10(Math.max(row.tvl_usd, 1)), row.chains.length, rate, ageRate];
     var z = odds.coefficients[0];
-    for (var j = 0; j < 3; j++) z += odds.coefficients[j + 1] * ((feats[j] - odds.means[j]) / odds.sds[j]);
+    for (var j = 0; j < 4; j++) z += odds.coefficients[j + 1] * ((feats[j] - odds.means[j]) / odds.sds[j]);
     return sigmoid(z);
+  }
+  // The row's age bucket and its token rate, as the odds model reads them.
+  function ageBucketText(row) {
+    var a = row.age_days, o = DATA.odds, r = o.age_null_rate, b = 'unknown age';
+    if (a != null) o.age_bucket_rates.forEach(function (x) { if (a >= x.min_days && (x.max_days == null || a < x.max_days)) { r = x.rate; b = x.bucket; } });
+    return b + ' — ' + Math.round(r * 100) + '% record a token';
   }
   function impliedOf(row, model, curve) {
     return Math.max(1, Math.round(valueOf(row, model, curve) * oddsOf(row, DATA.odds)));
@@ -79,14 +84,12 @@
   function stat(value, label, amber) {
     return el('div', { class: 'stat' + (amber ? ' amber' : '') }, el('b', { text: value }), el('span', { text: label }));
   }
-  // One row of a detail equation: a label and a value, the value in tabular numerals.
   function eqRow(label, value, cls) {
     return el('div', null, el('span', { text: label }), el('b', { class: 'num' + (cls ? ' ' + cls : ''), text: value }));
   }
   function verdictClass(v) { return v === 'ROBUST' ? 'robust' : v === 'FARM' ? 'farm' : v === 'THIN' ? 'thin' : 'skip'; }
 
-  // The farm plan is the same derivation main.ts writes to board.json: category, chains, TVL and age
-  // decide the action, the capital, the hold and every cost and time. No name is special-cased.
+  // The farm plan mirrors board.json: category, chains, TVL and age decide the action, capital, hold and costs.
   function chainOf(p) { return p.chains && p.chains.length > 0 ? p.chains[0] : 'its main chain'; }
   function capitalFor(p) {
     if (p.tvl_usd >= 5e9) return 250;
@@ -100,9 +103,8 @@
     if (age < 365) return 45;
     return 30;
   }
-  // One branch per category, naming the protocol's real mechanism; the fallback only serves a
-  // protocol with no category. Specific branches come first ('yield aggregator' before 'yield').
-  // This mirrors lib/model.ts exactly — the page's farm plans must agree with board.json.
+  // One branch per category, naming the real mechanism (specific first: 'yield aggregator' before
+  // 'yield'); mirrors lib/model.ts exactly.
   function actionFor(p, capital, chain) {
     var c = (p.category || '').toLowerCase();
     var name = p.name;
@@ -583,7 +585,8 @@
         stat('x' + b.curve_median_miss, 'Curve median miss, out of sample', true),
         stat('x' + b.flat_median_miss, 'Flat multiple median miss, same folds'),
         stat(Math.round(b.curve_within_3x * 100) + '% vs ' + Math.round(b.flat_within_3x * 100) + '%', 'Within 3x of the real cap: curve vs flat'),
-        stat('x' + b.band_low_mult + ' – x' + b.band_high_mult, 'Prediction band (P25–P75 of the out-of-sample residuals)')
+        stat('x' + b.band_low_mult + ' – x' + b.band_high_mult, 'Prediction band (P25–P75 of the out-of-sample residuals)'),
+        stat(Math.round(b.band_coverage_50 * 100) + '%', 'of comparables fall inside their row\u2019s band, out of sample (nominal 50%); the P10–P90 band holds ' + Math.round(b.band_coverage_80 * 100) + '% (nominal 80%)')
       ),
       el('p', { class: 'sub', text: '5-fold (deterministic folds by slug): curve x' + b.curve_five_fold_miss + ' against the flat multiple\u2019s x' + b.flat_five_fold_miss + '. ' + (b.time_split_n >= 5
         ? 'Time split: fitted on the ' + b.time_split_fit_n + ' comparables listed before 2024, the curve misses the ' + b.time_split_n + ' newer ones by x' + b.time_split_curve_miss + ' against the flat multiple\u2019s x' + b.time_split_flat_miss + ' — it holds forward in time, not just across the sample.'
@@ -604,11 +607,11 @@
         'value = 10 ^ (' + c.intercept + ' + ' + c.slope + ' x log10(tvl_usd) + offset(category)) x (1 + clamp(change_7d, ' + m.growth_floor + ', ' + m.growth_cap + ') / 100 x ' + m.growth_weight + ')'
       ),
       el('div', { class: 'formula' },
-        'odds = sigmoid(' + o.coefficients[0] + ' + ' + o.coefficients[1] + ' x z(log10 TVL) + ' + o.coefficients[2] + ' x z(chains) + ' + o.coefficients[3] + ' x z(category token rate))'
+        'odds = sigmoid(' + o.coefficients[0] + ' + ' + o.coefficients[1] + ' x z(log10 TVL) + ' + o.coefficients[2] + ' x z(chains) + ' + o.coefficients[3] + ' x z(category token rate) + ' + o.coefficients[4] + ' x z(age-bucket token rate))'
       ),
       el('div', { class: 'formula' }, 'implied = round(value x odds)'),
       el('p', { text: 'offset(category) is the median log10 residual of the category\u2019s live comparables against the curve, shrunk toward 0 with k=' + m.shrinkage_k + '. A category with fewer than ' + m.min_comparables + ' live comparables borrows its family\u2019s offset (below); one with no family gets offset 0.' }),
-      el('p', { text: 'The odds are a logistic regression on the ' + t.protocols + ' rankable protocols, target "records a token": log10 TVL, chain count, and the category\u2019s token rate (shrunk toward the base rate, k=' + m.odds_cat_k + '), each standardised. Age is deliberately NOT a feature: it measures time already had to launch, not likelihood of launching — adding it crushes young protocols\u2019 odds to single digits. Leave-one-out accuracy ' + (t.loo_accuracy * 100).toFixed(1) + '% against a ' + (t.base_rate * 100).toFixed(1) + '% base rate.' }),
+      el('p', { text: 'The odds are a logistic regression on the ' + t.protocols + ' rankable protocols, target "records a token": log10 TVL, chain count, the category\u2019s token rate and the age bucket\u2019s token rate (each shrunk toward the base rate, k=' + m.odds_cat_k + '), each standardised. The token rate by age is not monotone — 31% under 90 days, 19% at 90–180 days, 86% past 3 years — so the model reads the rate of the protocol\u2019s own age bucket, not a linear age term. Leave-one-out accuracy ' + (t.loo_accuracy * 100).toFixed(1) + '% against a ' + (t.base_rate * 100).toFixed(1) + '% base rate.' }),
       el('p', { text: 'Set aside as speculative — ' + c.speculative_excluded.map(function (s) { return s.name + ' (' + (Math.round(s.ratio * 10) / 10) + 'x its TVL)'; }).join(', ') + ': a token above ' + m.speculative_cap + 'x its TVL is priced on speculation, not on the protocol\u2019s record, so the curve is fitted on the other ' + c.comparables + ' comparables.' }),
       categoryOffsets(),
       familyOffsets()
@@ -685,6 +688,7 @@
         eqRow('Seven-day growth', fmtPct(row.change_7d)),
         eqRow('Growth multiplier', row.growth_multiplier),
         eqRow('Age with no token', fmtAge(row.age_days)),
+        eqRow('Age bucket', ageBucketText(row)),
         eqRow('Value if it launches', fmtUsd(row.value_if_launches_usd)),
         eqRow('Launch odds', (row.launch_odds * 100).toFixed(1) + '%'),
         eqRow('Implied value (value x odds)', fmtUsd(row.implied_value_usd)),

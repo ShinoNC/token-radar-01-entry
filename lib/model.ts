@@ -1,4 +1,4 @@
-// The token radar's model (radar-5): one snapshot of the protocol universe in, one ranked board out.
+// The token radar's model (radar-6): one snapshot of the protocol universe in, one ranked board out.
 //
 // The board covers every slug in the snapshot's watchlist (the floor, never a ceiling) and every other
 // pre-token protocol the watchlist's own exclusion rule would keep: no wrapped, staked, bridged or
@@ -21,15 +21,24 @@
 //     growthMult = 1 + (clamp(change_7d, -60, 120) / 100) x 0.5
 //     value      = value x growthMult
 //   LAUNCH ODDS (a logistic regression on the snapshot's own token statuses):
-//     odds = sigmoid(w0 + w1 x z(log10 TVL) + w2 x z(chains) + w3 x z(category token rate))
+//     odds = sigmoid(w0 + w1 x z(log10 TVL) + w2 x z(chains) + w3 x z(category token rate)
+//                      + w4 x z(age-bucket token rate))
 //     fitted on the 442 rankable protocols; the target is whether the protocol records a token.
-//     Age is DELIBERATELY not a feature: age measures time already had to launch, not likelihood
-//     of launching — a young protocol has not had its window yet, and an old pre-token protocol
-//     has passed its own. (Tested: adding age lifts the classifier's accuracy on "has a token
-//     now" but crushes young protocols' odds to single digits — the wrong answer to the launch
-//     question. The maturity multiplier radar-4 carried had the same flaw: it HURT the value
-//     model's out-of-sample miss, so radar-5 drops it.)
+//     The age feature is a BUCKET RATE, not a linear age term: the token rate by age is
+//     non-monotone (0-90d 31%, 90-180d 19%, 180-365d 38%, 1-2y 39%, 2-3y 63%, 3y+ 86%),
+//     and a linear term cannot bend at the 90-180d dip — it would also crush young protocols'
+//     odds to single digits. A bucket rate gives a young protocol its bucket's own rate (about
+//     one in three protocols its age record a token), which is the honest reading of the
+//     snapshot. The bucket rate is shrunk toward the base rate (k = 8), exactly like the
+//     category rate, and refit per fold in the validation. Leave-one-out accuracy 72.0%
+//     against a 55.2% base rate (radar-5's three-feature model: 60.6%).
 //   IMPLIED = max(1, round(value x odds))
+//
+//   The slope stays GLOBAL on purpose: per-category slopes were tested (two formulations,
+//   naive and centred on each category's mean TVL) and hurt out of sample — the within-
+//   category TVL range is too narrow to identify a slope at n = 11-13, and the raw slopes
+//   run from -1.8 to +1.8 against a global 0.49. The category story is carried by the
+//   offsets alone, which is what the evidence supports.
 //
 // The comparables are the live-token protocols that pass the watchlist's exclusion rule AND trade at
 // no more than 5x their TVL. A token above 5x TVL is priced on speculation about future volume, not
@@ -37,9 +46,11 @@
 // aside, named, in the model's own audit. The curve is TESTED, not assumed: leave-one-out, 5-fold
 // and a time split, each comparable priced by a curve fitted without it (see backtest()). The
 // prediction band (P25-P75 of the out-of-sample residuals) is carried on every row, so the board
-// states its own uncertainty. No protocol name is ever special-cased: the same functions score every
-// row, and the curve, the offsets, the families and the odds are computed from the snapshot at
-// runtime, never hardcoded.
+// states its own uncertainty — and the band is CALIBRATED, not just drawn: each row's band, built
+// from the other comparables' residuals, holds the held-out protocol's real market cap 45% of the
+// time (nominal 50%), and the wider P10-P90 band holds 78% (nominal 80%). No protocol name is ever
+// special-cased: the same functions score every row, and the curve, the offsets, the families and
+// the odds are computed from the snapshot at runtime, never hardcoded.
 //
 // Farm economics: a $1,000 plan's slice is what $1,000 deposited would get if 10% of the launch goes
 // to depositors pro rata (slice = 1000/TVL x 10% x implied). Net = slice - gas fees - the 4% T-bill
@@ -84,6 +95,8 @@ export interface ModelConstants {
   speculative_cap: number;
   /** The shrinkage strength for a category's token rate in the odds model (pseudo-observations toward the base rate). */
   odds_cat_k: number;
+  /** The shrinkage strength for an age bucket's token rate in the odds model (same rule, same strength). */
+  odds_age_k: number;
   /** The L2 penalty on the odds model's logistic regression (the intercept is never penalised). */
   odds_lambda: number;
   /** The share of a launch that goes to depositors pro rata, for the $1,000 slice. */
@@ -105,6 +118,7 @@ export const MODEL: ModelConstants = {
   growth_cap: 120,
   speculative_cap: 5,
   odds_cat_k: 8,
+  odds_age_k: 8,
   odds_lambda: 1,
   airdrop_share: 0.1,
   tbill_rate: 0.04,
@@ -114,7 +128,7 @@ export const MODEL: ModelConstants = {
 };
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-5';
+export const MODEL_VERSION = 'radar-6';
 
 /** How many live-token protocols the Live token view carries, by market cap. */
 export const LIVE_ROWS = 24;
@@ -299,6 +313,10 @@ export interface Backtest {
   flat_within_3x: number;
   /** Share of comparables the curve prices within 10x, out of sample. */
   curve_within_10x: number;
+  /** Share of comparables whose real market cap falls inside the band their own row would carry (category, family or board tier, built from the other comparables' residuals): the band's honest calibration against its nominal 50%. */
+  band_coverage_50: number;
+  /** Share of comparables whose real market cap falls inside the wider P10-P90 band of the other residuals: the wider band's calibration against its nominal 80%. */
+  band_coverage_80: number;
   /** The prediction band's multipliers (P25-P75 of the out-of-sample residuals, in linear units). */
   band_low_mult: number;
   band_high_mult: number;
@@ -316,13 +334,29 @@ export interface Backtest {
   time_split_n: number;
 }
 
+/** One age bucket's token rate: the share of rankable protocols of that age that record a token, shrunk toward the base rate. */
+export interface AgeBucketRate {
+  /** The bucket's label, e.g. "0–90d" or "3y+". */
+  bucket: string;
+  /** The bucket's lower edge in days (inclusive). */
+  min_days: number;
+  /** The bucket's upper edge in days (exclusive), or null for the open-ended oldest bucket. */
+  max_days: number | null;
+  /** Rankable protocols in the bucket. */
+  protocols: number;
+  /** Of those, how many record a token. */
+  with_token: number;
+  /** The shrunk token rate. */
+  rate: number;
+}
+
 /** The launch-odds model: a logistic regression on the snapshot's own token statuses. */
 export interface OddsFit {
-  /** Coefficients: [intercept, log10 TVL, chains, category token rate] on standardised features. */
+  /** Coefficients: [intercept, log10 TVL, chains, category token rate, age-bucket token rate] on standardised features. */
   coefficients: number[];
-  /** The standardisation means for [log10 TVL, chains, category token rate]. */
+  /** The standardisation means for [log10 TVL, chains, category token rate, age-bucket token rate]. */
   means: number[];
-  /** The standardisation standard deviations for the same three features. */
+  /** The standardisation standard deviations for the same four features. */
   sds: number[];
   /** The base rate: the share of rankable protocols that record a token. */
   base_rate: number;
@@ -330,6 +364,10 @@ export interface OddsFit {
   protocols: number;
   /** One entry per category with at least one rankable protocol: its shrunk token rate. */
   category_rates: { category: string; protocols: number; with_token: number; rate: number }[];
+  /** One entry per age bucket: its shrunk token rate. */
+  age_bucket_rates: AgeBucketRate[];
+  /** The shrunk token rate for protocols whose listing date is not recorded. */
+  age_null_rate: number;
 }
 
 /** The odds model's validation: leave-one-out accuracy against the base rate. */
@@ -652,6 +690,7 @@ export function backtest(snapshot: Snapshot, model: ModelConstants = MODEL): Bac
   const curveMisses: number[] = [];
   const flatMisses: number[] = [];
   const oosResiduals: number[] = [];
+  const oosList: { category: string; family: string | null; residual: number }[] = [];
   const oosByCategory = new Map<string, number[]>();
   const oosByFamily = new Map<string, number[]>();
   for (let i = 0; i < comps.length; i++) {
@@ -663,6 +702,7 @@ export function backtest(snapshot: Snapshot, model: ModelConstants = MODEL): Bac
     flatMisses.push(missOf(held.tvl_usd * flatMedian, held.mcap_usd!));
     const res = Math.log10(held.mcap_usd!) - Math.log10(pred);
     oosResiduals.push(res);
+    oosList.push({ category: held.category ?? 'Other', family: familyOf(held.category), residual: res });
     const cat = held.category ?? 'Other';
     const clist = oosByCategory.get(cat);
     if (clist === undefined) oosByCategory.set(cat, [res]);
@@ -725,6 +765,32 @@ export function backtest(snapshot: Snapshot, model: ModelConstants = MODEL): Bac
     timeSplitFlat = round4(medianOf([...fm].sort((a, b) => a - b)));
   }
   const overallBand = bandOf(oosResiduals);
+  // Band calibration, honestly measured: for each comparable, the band is built from the OTHER
+  // comparables' residuals (centred on their median, exactly as bandOf builds it), and the held
+  // one's real market cap is checked against it. The P25-P75 coverage uses the band the board
+  // would actually assign that row (its category's, else its family's, else the board's); the
+  // P10-P90 coverage uses the board's band. A band that claims 50% should hold about half.
+  const coverageAt = (qLow: number, qHigh: number, tiered: boolean): number => {
+    let inside = 0;
+    for (let i = 0; i < oosList.length; i++) {
+      const held = oosList[i]!;
+      let pool = oosResiduals.filter((_, j) => j !== i);
+      if (tiered) {
+        const catPool = oosList.filter((o, j) => j !== i && o.category === held.category).map((o) => o.residual);
+        const famPool = held.family === null
+          ? []
+          : oosList.filter((o, j) => j !== i && o.family === held.family).map((o) => o.residual);
+        if (catPool.length >= 5) pool = catPool;
+        else if (famPool.length >= 5) pool = famPool;
+      }
+      const sorted = [...pool].sort((a, b) => a - b);
+      const med = medianOf(sorted);
+      const centred = sorted.map((r) => r - med);
+      const c = held.residual - med;
+      if (c >= percentileOf(centred, qLow) && c <= percentileOf(centred, qHigh)) inside++;
+    }
+    return round4(inside / oosList.length);
+  };
   return {
     curve_median_miss: round4(medianOf([...curveMisses].sort((a, b) => a - b))),
     flat_median_miss: round4(medianOf([...flatMisses].sort((a, b) => a - b))),
@@ -733,6 +799,8 @@ export function backtest(snapshot: Snapshot, model: ModelConstants = MODEL): Bac
     curve_within_3x: within(curveMisses, 3),
     flat_within_3x: within(flatMisses, 3),
     curve_within_10x: within(curveMisses, 10),
+    band_coverage_50: coverageAt(model.band_low, model.band_high, true),
+    band_coverage_80: coverageAt(0.1, 0.9, false),
     band_low_mult: overallBand.low_mult,
     band_high_mult: overallBand.high_mult,
     band_by_category,
@@ -752,12 +820,47 @@ export function rankableProtocols(snapshot: Snapshot): SnapshotProtocol[] {
 /** The logistic function, clamped so it never overflows. */
 const sigmoid = (z: number): number => 1 / (1 + Math.exp(-Math.max(-30, Math.min(30, z))));
 
-/** The odds model's three features, unstandardised: log10 TVL, chain count, and the category's token rate (filled in by the caller). */
-type OddsFeatures = { logTvl: number; nChains: number; catRate: number };
+/**
+ * The age buckets: 3 months, 6 months, 1 year, 2 years, 3 years. The token rate is not monotone
+ * in age — it dips at 90-180 days, when a protocol is old enough to have been expected to launch
+ * and young enough not to have done it — so the odds model reads the rate of the protocol's own
+ * bucket rather than a linear age term, which cannot bend at the dip.
+ */
+export const AGE_BUCKETS: { label: string; min: number; max: number | null }[] = [
+  { label: '0–90d', min: 0, max: 90 },
+  { label: '90–180d', min: 90, max: 180 },
+  { label: '180–365d', min: 180, max: 365 },
+  { label: '1–2y', min: 365, max: 730 },
+  { label: '2–3y', min: 730, max: 1095 },
+  { label: '3y+', min: 1095, max: null },
+];
 
-/** A protocol's odds features, with the category rate from `catRate`. */
-function oddsFeatures(p: SnapshotProtocol, catRate: (p: SnapshotProtocol) => number): OddsFeatures {
-  return { logTvl: Math.log10(Math.max(p.tvl_usd, 1)), nChains: p.chains.length, catRate: catRate(p) };
+/** The bucket an age in days falls in, or -1 when the age is not recorded. */
+export function ageBucket(age: number | null): number {
+  if (age === null) return -1;
+  for (let i = 0; i < AGE_BUCKETS.length; i++) {
+    const b = AGE_BUCKETS[i]!;
+    if (age >= b.min && (b.max === null || age < b.max)) return i;
+  }
+  return AGE_BUCKETS.length - 1;
+}
+
+/** The odds model's four features, unstandardised: log10 TVL, chain count, the category's token rate and the age bucket's token rate (both filled in by the caller). */
+type OddsFeatures = { logTvl: number; nChains: number; catRate: number; ageRate: number };
+
+/** A protocol's odds features, with the category rate from `catRate` and the age-bucket rate from `ageRate`. */
+function oddsFeatures(
+  p: SnapshotProtocol,
+  age: number | null,
+  catRate: (p: SnapshotProtocol) => number,
+  ageRate: (age: number | null) => number,
+): OddsFeatures {
+  return {
+    logTvl: Math.log10(Math.max(p.tvl_usd, 1)),
+    nChains: p.chains.length,
+    catRate: catRate(p),
+    ageRate: ageRate(age),
+  };
 }
 
 /** A shrunk category token rate: (with_token + k x base) / (n + k), so a small category borrows the base rate. */
@@ -781,6 +884,26 @@ function categoryTokenRates(
   return { base, rates };
 }
 
+/** A shrunk age-bucket token rate: (with_token + k x base) / (n + k) per bucket, so a thin bucket borrows the base rate. Protocols with no recorded listing date get their own shrunk rate. */
+function ageBucketRates(
+  protocols: SnapshotProtocol[],
+  ages: (number | null)[],
+  model: ModelConstants,
+): { base: number; rates: number[]; counts: { n: number; has: number }[]; nullRate: number; nullCount: { n: number; has: number } } {
+  const base = protocols.filter((p) => !isPreToken(p)).length / protocols.length;
+  const counts = AGE_BUCKETS.map(() => ({ n: 0, has: 0 }));
+  const nullCount = { n: 0, has: 0 };
+  for (let j = 0; j < protocols.length; j++) {
+    const b = ageBucket(ages[j]!);
+    const target = b === -1 ? nullCount : counts[b]!;
+    target.n++;
+    if (!isPreToken(protocols[j]!)) target.has++;
+  }
+  const rates = counts.map((c) => (c.has + model.odds_age_k * base) / (c.n + model.odds_age_k));
+  const nullRate = (nullCount.has + model.odds_age_k * base) / (nullCount.n + model.odds_age_k);
+  return { base, rates, counts, nullRate, nullCount };
+}
+
 /** A logistic regression by batch gradient descent: fixed iterations, fixed step, no randomness. */
 function fitLogistic(rows: number[][], ys: number[], lambda: number, iters: number): number[] {
   const d = rows[0]!.length;
@@ -802,17 +925,24 @@ function fitLogistic(rows: number[][], ys: number[], lambda: number, iters: numb
 
 /**
  * The launch-odds model, fitted from the snapshot's own token statuses: a logistic regression on
- * the rankable protocols, target "records a token". Features: log10 TVL, chain count, and the
- * category's shrunk token rate — each standardised on the training set. Age is deliberately NOT a
- * feature (see the header comment): it measures time already had to launch, not likelihood of
- * launching. The fit is deterministic: fixed iterations, no randomness, no wall clock.
+ * the rankable protocols, target "records a token". Features: log10 TVL, chain count, the
+ * category's shrunk token rate, and the age bucket's shrunk token rate — each standardised on
+ * the training set. The age feature is a bucket rate, not a linear age term (see the header
+ * comment): the token rate dips at 90-180 days and a linear term cannot bend there. The fit is
+ * deterministic: fixed iterations, no randomness, no wall clock.
  */
 export function fitOdds(snapshot: Snapshot, model: ModelConstants = MODEL): OddsFit {
   const protocols = rankableProtocols(snapshot);
+  const ages = protocols.map((p) => ageDays(snapshot.as_of, p.listed_at));
   const { base, rates } = categoryTokenRates(protocols, model);
+  const buckets = ageBucketRates(protocols, ages, model);
   const catRate = (p: SnapshotProtocol): number => rates.get(p.category ?? 'Other')?.rate ?? base;
-  const feats = protocols.map((p) => oddsFeatures(p, catRate));
-  const keys: (keyof OddsFeatures)[] = ['logTvl', 'nChains', 'catRate'];
+  const ageRate = (age: number | null): number => {
+    const b = ageBucket(age);
+    return b === -1 ? buckets.nullRate : buckets.rates[b]!;
+  };
+  const feats = protocols.map((p, i) => oddsFeatures(p, ages[i]!, catRate, ageRate));
+  const keys: (keyof OddsFeatures)[] = ['logTvl', 'nChains', 'catRate', 'ageRate'];
   const means = keys.map((k) => feats.reduce((s, f) => s + f[k], 0) / feats.length);
   const sds = keys.map((k, j) => {
     const v = Math.sqrt(feats.reduce((s, f) => s + (f[k] - means[j]!) ** 2, 0) / feats.length);
@@ -828,6 +958,14 @@ export function fitOdds(snapshot: Snapshot, model: ModelConstants = MODEL): Odds
   const category_rates = [...rates.entries()]
     .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
     .map(([category, v]) => ({ category, protocols: v.n, with_token: v.has, rate: round4(v.rate) }));
+  const age_bucket_rates: AgeBucketRate[] = AGE_BUCKETS.map((b, i) => ({
+    bucket: b.label,
+    min_days: b.min,
+    max_days: b.max,
+    protocols: buckets.counts[i]!.n,
+    with_token: buckets.counts[i]!.has,
+    rate: round4(buckets.rates[i]!),
+  }));
   return {
     coefficients: coefficients.map(round4),
     means: means.map(round4),
@@ -835,34 +973,47 @@ export function fitOdds(snapshot: Snapshot, model: ModelConstants = MODEL): Odds
     base_rate: round4(base),
     protocols: protocols.length,
     category_rates,
+    age_bucket_rates,
+    age_null_rate: round4(buckets.nullRate),
   };
 }
 
-/** The launch odds one protocol gets under a fitted odds model. */
-export function oddsFor(p: SnapshotProtocol, fit: OddsFit): number {
+/** The launch odds one protocol gets under a fitted odds model, at its age in days (null when its listing date is not recorded). */
+export function oddsFor(p: SnapshotProtocol, fit: OddsFit, age: number | null): number {
   const rate = fit.category_rates.find((c) => c.category === (p.category ?? 'Other'))?.rate ?? fit.base_rate;
-  const feats = [Math.log10(Math.max(p.tvl_usd, 1)), p.chains.length, rate];
+  const b = ageBucket(age);
+  const ageRate = b === -1
+    ? fit.age_null_rate
+    : fit.age_bucket_rates[b]?.rate ?? fit.base_rate;
+  const feats = [Math.log10(Math.max(p.tvl_usd, 1)), p.chains.length, rate, ageRate];
   let z = fit.coefficients[0]!;
-  for (let j = 0; j < 3; j++) z += fit.coefficients[j + 1]! * ((feats[j]! - fit.means[j]!) / fit.sds[j]!);
+  for (let j = 0; j < 4; j++) z += fit.coefficients[j + 1]! * ((feats[j]! - fit.means[j]!) / fit.sds[j]!);
   return sigmoid(z);
 }
 
 /**
  * The odds model's validation: leave-one-out, each protocol's token status called by a model fitted
- * without it (standardisation and category rates refit per fold), against the base rate the
- * majority class alone would call right. Fewer gradient steps per fold than the full fit — the
- * coefficients converge long before 150 steps, and the validation runs 442 fits.
+ * without it (standardisation, category rates and age-bucket rates refit per fold), against the
+ * base rate the majority class alone would call right. Fewer gradient steps per fold than the full
+ * fit — the coefficients converge long before 150 steps, and the validation runs 442 fits.
  */
 export function oddsBacktest(snapshot: Snapshot, model: ModelConstants = MODEL): OddsBacktest {
   const protocols = rankableProtocols(snapshot);
+  const ages = protocols.map((p) => ageDays(snapshot.as_of, p.listed_at));
   const base = protocols.filter((p) => !isPreToken(p)).length / protocols.length;
   let correct = 0;
   for (let i = 0; i < protocols.length; i++) {
     const rest = protocols.filter((_, j) => j !== i);
+    const restAges = ages.filter((_, j) => j !== i);
     const { base: b, rates } = categoryTokenRates(rest, model);
+    const buckets = ageBucketRates(rest, restAges, model);
     const catRate = (p: SnapshotProtocol): number => rates.get(p.category ?? 'Other')?.rate ?? b;
-    const feats = rest.map((p) => oddsFeatures(p, catRate));
-    const keys: (keyof OddsFeatures)[] = ['logTvl', 'nChains', 'catRate'];
+    const ageRate = (age: number | null): number => {
+      const bi = ageBucket(age);
+      return bi === -1 ? buckets.nullRate : buckets.rates[bi]!;
+    };
+    const feats = rest.map((p, j) => oddsFeatures(p, restAges[j]!, catRate, ageRate));
+    const keys: (keyof OddsFeatures)[] = ['logTvl', 'nChains', 'catRate', 'ageRate'];
     const means = keys.map((k) => feats.reduce((s, f) => s + f[k], 0) / feats.length);
     const sds = keys.map((k, j) => {
       const v = Math.sqrt(feats.reduce((s, f) => s + (f[k] - means[j]!) ** 2, 0) / feats.length);
@@ -876,7 +1027,7 @@ export function oddsBacktest(snapshot: Snapshot, model: ModelConstants = MODEL):
       150,
     );
     const held = protocols[i]!;
-    const f = oddsFeatures(held, catRate);
+    const f = oddsFeatures(held, ages[i]!, catRate, ageRate);
     const row = design(f);
     let z = 0;
     for (let j = 0; j < row.length; j++) z += row[j]! * w[j]!;
@@ -909,7 +1060,7 @@ export function impliedValue(
   const growthMult = 1 + (growthPct / 100) * model.growth_weight;
   const { offset, family } = offsetFor(protocol.category, fit);
   const value = Math.max(1, Math.round(10 ** (fit.intercept + fit.slope * Math.log10(Math.max(protocol.tvl_usd, 1)) + offset) * growthMult));
-  const p = oddsFor(protocol, odds);
+  const p = oddsFor(protocol, odds, age);
   const implied = Math.max(1, Math.round(value * p));
   return { value, odds: round4(p), implied, offset, family, growthPct, growthMult, age };
 }
