@@ -1,9 +1,11 @@
 // Token Radar: the program behind the dashboard (Node 22, standard library only).
 //
 // It reads the sealed DefiLlama snapshot — /input/snapshot.json, or --input
-// <file|directory> — scores every pre-token protocol with the radar-4 model in
+// <file|directory> — scores every pre-token protocol with the radar-5 model in
 // lib/model.ts (a size curve fitted to the tokens that already trade, tested
-// out of sample, with shrunk category offsets), and writes the ranked board to
+// out of sample, with shrunk category offsets and family fallbacks, times
+// launch odds from a logistic regression on the snapshot's own token
+// statuses), and writes the ranked board to
 // /output/board.json plus the dashboard's data as /output/data.js. The static
 // dashboard (dashboard/) and the screenshots (screenshots/) are copied to
 // /output unchanged. Last, it writes /output/dossier.json, the summary the
