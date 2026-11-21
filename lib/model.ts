@@ -1,4 +1,4 @@
-// The token radar's model (radar-6): one snapshot of the protocol universe in, one ranked board out.
+// The token radar's model (radar-7): one snapshot of the protocol universe in, one ranked board out.
 //
 // The board covers every slug in the snapshot's watchlist (the floor, never a ceiling) and every other
 // pre-token protocol the watchlist's own exclusion rule would keep: no wrapped, staked, bridged or
@@ -128,7 +128,7 @@ export const MODEL: ModelConstants = {
 };
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-6';
+export const MODEL_VERSION = 'radar-7';
 
 /** How many live-token protocols the Live token view carries, by market cap. */
 export const LIVE_ROWS = 24;

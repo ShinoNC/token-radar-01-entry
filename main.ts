@@ -1,7 +1,7 @@
 // Token Radar: the program behind the dashboard (Node 22, standard library only).
 //
 // It reads the sealed DefiLlama snapshot — /input/snapshot.json, or --input
-// <file|directory> — scores every pre-token protocol with the radar-6 model in
+// <file|directory> — scores every pre-token protocol with the radar-7 model in
 // lib/model.ts (a size curve fitted to the tokens that already trade, tested
 // out of sample, with shrunk category offsets and family fallbacks, times
 // launch odds from a logistic regression on the snapshot's own token
@@ -11,6 +11,12 @@
 // dashboard (dashboard/) and the screenshots (screenshots/) are copied to
 // /output unchanged. Last, it writes /output/dossier.json, the summary the
 // judge reads, with the vendored make.fun library.
+//
+// radar-7 keeps radar-6's model and board exactly: the change is the
+// dashboard's presentation — larger, brighter type, a tighter header so the
+// board shows in the first viewport, a model sandbox that re-ranks the board
+// live, and four screenshots (the board, a detail view, the sandbox, a farm
+// plan) instead of three.
 //
 // The dashboard is a static page: no framework, no network. Its three files
 // read /output/data.js, which this program writes from the same board the
@@ -94,7 +100,7 @@ function main(): void {
   copyDir(join(REPO, 'dashboard'), join(out, 'dashboard'));
   const shots = copyDir(join(REPO, 'screenshots'), join(out, 'screenshots'));
   if (shots.length <= 2) {
-    fail(`token radar: screenshots/ holds ${shots.length} image${shots.length === 1 ? '' : 's'}: hand in 3, the board, a detail view and a filtered view`, 1);
+    fail(`token radar: screenshots/ holds ${shots.length} image${shots.length === 1 ? '' : 's'}: hand in 3 or 4, the board, a detail view, the sandbox and a farm plan`, 1);
   }
   for (const shot of shots) {
     if (!SHOT_NAME.test(shot)) {
